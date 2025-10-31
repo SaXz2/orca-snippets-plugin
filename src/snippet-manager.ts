@@ -1,3 +1,14 @@
+// CodeMirror 6 imports
+import { EditorState } from "@codemirror/state";
+import { EditorView, lineNumbers, highlightSpecialChars, drawSelection, dropCursor, highlightActiveLine, keymap, rectangularSelection, crosshairCursor } from "@codemirror/view";
+import { history, historyKeymap, indentWithTab, defaultKeymap } from "@codemirror/commands";
+import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import { javascript } from "@codemirror/lang-javascript";
+import { css } from "@codemirror/lang-css";
+import { bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting, indentUnit } from "@codemirror/language";
+import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { oneDark } from "@codemirror/theme-one-dark";
+
 /**
  * 代码片段数据结构
  */
@@ -37,7 +48,7 @@ export class SnippetManager {
         });
       }
     } catch (error) {
-      console.error(`[${this.pluginName}] Failed to load snippets:`, error);
+      // Silently fail to load snippets
     }
   }
 
@@ -46,10 +57,18 @@ export class SnippetManager {
    */
   private async saveSnippets() {
     const snippetsArray = Array.from(this.snippets.values());
+    const dataStr = JSON.stringify(snippetsArray);
+    
+    // 检查数据大小（MB）
+    const dataSizeMB = new Blob([dataStr]).size / 1024 / 1024;
+    if (dataSizeMB > 1) {
+      // Data size warning skipped
+    }
+    
     await orca.plugins.setData(
       this.pluginName,
       "snippets",
-      JSON.stringify(snippetsArray)
+      dataStr
     );
   }
 
@@ -146,9 +165,6 @@ export class SnippetManager {
       const validation = this.validateJavaScript(snippet.content);
       if (!validation.valid) {
         // 即使验证失败，也尝试注入（因为有些代码 Function 构造函数无法解析，但浏览器可以执行）
-        console.warn(
-          `[${this.pluginName}] JavaScript validation warning for "${snippet.name}": ${validation.error}. Will attempt to inject anyway.`
-        );
       }
 
       // 注入 JavaScript
@@ -163,7 +179,6 @@ export class SnippetManager {
             const func = new Function(snippet.content);
             func();
           } catch (error: any) {
-            console.error(`[${this.pluginName}] Error executing snippet "${snippet.name}":`, error);
             orca.notify(
               "error",
               `JavaScript error in "${snippet.name}": ${error.message}`,
@@ -188,22 +203,21 @@ export class SnippetManager {
           executeCode();
         }
         
-        // 创建一个占位 script 元素用于追踪
-        const scriptElement = document.createElement("script");
-        scriptElement.id = elementId;
-        scriptElement.type = "text/javascript";
-        scriptElement.textContent = `// Code snippet: ${snippet.name}`;
-        document.head.appendChild(scriptElement);
-        this.injectedElements.set(snippet.id, scriptElement);
-        
-        console.log(`[${this.pluginName}] Injected JavaScript snippet: ${snippet.name} (ID: ${elementId})`);
+        // 不创建 script 元素，直接使用 div 元素来追踪
+        // 这样可以避免 CSP 错误
+        const trackerElement = document.createElement("div");
+        trackerElement.id = elementId;
+        trackerElement.style.display = "none";
+        trackerElement.setAttribute("data-snippet-name", snippet.name);
+        trackerElement.setAttribute("data-snippet-type", "js");
+        document.body.appendChild(trackerElement);
+        this.injectedElements.set(snippet.id, trackerElement);
       } catch (error: any) {
         orca.notify(
           "error",
           `Failed to inject JavaScript "${snippet.name}": ${error.message}`,
           { title: "Code Snippet Error" }
         );
-        console.error(`[${this.pluginName}] Failed to inject JavaScript:`, error);
       }
     }
   }
@@ -318,11 +332,8 @@ export class SnippetManager {
    * 打开代码片段管理器
    */
   async openManager() {
-    console.log(`[${this.pluginName}] openManager called`);
-    
     const React = window.React;
     if (!React) {
-      console.error(`[${this.pluginName}] React is not available`);
       return;
     }
     
@@ -337,11 +348,8 @@ export class SnippetManager {
     const Menu = orca.components.Menu;
     const MenuText = orca.components.MenuText;
 
-    console.log(`[${this.pluginName}] Components loaded, Popup:`, !!Popup);
-
     // 如果已经有打开的菜单，先关闭
     if (this.managerPopupVisible) {
-      console.log(`[${this.pluginName}] Menu already visible, closing`);
       this.managerPopupVisible = false;
       // 清理管理器容器
       const container = document.getElementById(`${this.pluginName}-manager-container`);
@@ -360,7 +368,7 @@ export class SnippetManager {
           try {
             editRoot.unmount();
           } catch (e) {
-            console.warn(`[${this.pluginName}] Error unmounting edit root:`, e);
+            // Error unmounting edit root
           }
         }
         editContainer.remove();
@@ -371,13 +379,12 @@ export class SnippetManager {
     // 清理可能存在的旧编辑对话框容器（如果管理器未打开但编辑对话框还在）
     const existingEditContainer = document.getElementById(`${this.pluginName}-edit-container`);
     if (existingEditContainer) {
-      console.log(`[${this.pluginName}] Cleaning up existing edit container`);
       const existingEditRoot = (existingEditContainer as any)._reactRootContainer;
       if (existingEditRoot) {
         try {
           existingEditRoot.unmount();
         } catch (e) {
-          console.warn(`[${this.pluginName}] Error unmounting existing edit root:`, e);
+          // Error unmounting existing edit root
         }
       }
       existingEditContainer.remove();
@@ -455,7 +462,6 @@ export class SnippetManager {
       };
 
       const handleClose = () => {
-        console.log(`[${this.pluginName}] Closing manager menu`);
         setVisible(false);
         this.managerPopupVisible = false;
       };
@@ -473,7 +479,7 @@ export class SnippetManager {
                 try {
                   root.unmount();
                 } catch (e) {
-                  console.warn(`[${this.pluginName}] Error unmounting root:`, e);
+                  // Error unmounting root
                 }
               }
             }
@@ -528,25 +534,20 @@ export class SnippetManager {
       // 如果按钮元素不存在或不可见，不显示 Popup
       const currentButton = buttonElement || getButtonElement();
       if (!currentButton || !visible) {
-        console.log(`[${this.pluginName}] Popup not shown - button:`, !!currentButton, `visible:`, visible);
         return null;
       }
       
       // 更新 ref
       buttonRef.current = currentButton;
-      
-      console.log(`[${this.pluginName}] Rendering Popup with button:`, currentButton);
       return React.createElement(
         Popup,
         {
           refElement: buttonRef as any,
           visible: visible,
           onClose: () => {
-            console.log(`[${this.pluginName}] Popup onClose called`);
             handleClose();
           },
           onClosed: () => {
-            console.log(`[${this.pluginName}] Popup onClosed called`);
             this.managerPopupVisible = false;
             // 确保状态清理
             setVisible(false);
@@ -555,8 +556,8 @@ export class SnippetManager {
           defaultPlacement: "bottom",
           alignment: "center",
           style: { 
-            width: "min(400px, 90vw)",
-            maxHeight: "80vh",
+            width: "min(320px, 90vw)",
+            maxHeight: "70vh",
           },
           className: `${this.pluginName}-manager-popup`,
         },
@@ -564,14 +565,15 @@ export class SnippetManager {
           "div",
           {
             style: {
-              width: "min(400px, 90vw)",
-              maxHeight: "80vh",
-              backgroundColor: "var(--orca-bg-primary, #fff)",
-              borderRadius: "8px",
+              width: "min(320px, 90vw)",
+              maxHeight: "70vh",
+              backgroundColor: "var(--orca-bg-primary, var(--orca-color-bg-1))",
+              borderRadius: "var(--orca-radius-md)",
               display: "flex",
               flexDirection: "column",
               overflow: "hidden",
-              boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+              border: "1px solid var(--orca-border-color, var(--orca-color-border))",
+              boxShadow: "var(--orca-shadow-popup)",
             },
           },
           // 顶部容器（参考插件的设计）
@@ -579,12 +581,13 @@ export class SnippetManager {
             "div",
             {
               style: {
-                padding: "10px 16px",
-                borderBottom: "1px solid var(--orca-border-color, #e0e0e0)",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
-                userSelect: "none",
+              padding: "8px 12px",
+              borderBottom: "1px solid var(--orca-border-color, var(--orca-color-border))",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              userSelect: "none",
+              backgroundColor: "var(--orca-bg-primary, var(--orca-color-bg-1))",
               },
             },
             // CSS/JS 标签切换
@@ -596,7 +599,7 @@ export class SnippetManager {
                   position: "relative",
                   padding: "0 6px",
                   borderRadius: "6px",
-                  backgroundColor: "var(--orca-bg-secondary, #f5f5f5)",
+                  backgroundColor: "var(--orca-bg-secondary, var(--orca-color-bg-2))",
                 },
               },
               React.createElement(
@@ -621,7 +624,7 @@ export class SnippetManager {
                     height: "30px",
                     width: "60px",
                     cursor: "pointer",
-                    color: snippetType === "css" ? "var(--orca-primary-color, #007bff)" : "var(--orca-text-secondary, #666)",
+                    color: snippetType === "css" ? "var(--orca-primary-color, var(--orca-color-primary-5))" : "var(--orca-text-secondary, var(--orca-color-text-2))",
                     fontWeight: snippetType === "css" ? 600 : 400,
                     transition: "all 0.2s",
                     zIndex: 2,
@@ -641,11 +644,11 @@ export class SnippetManager {
                       marginLeft: "0.4em",
                       borderRadius: "4px",
                       backgroundColor: snippetType === "css" 
-                        ? "var(--orca-primary-color, #007bff)"
-                        : "var(--orca-bg-primary, #fff)",
+                        ? "var(--orca-primary-color, var(--orca-color-primary-5))"
+                        : "transparent",
                       color: snippetType === "css" 
                         ? "#fff" 
-                        : "var(--orca-text-secondary, #666)",
+                        : "var(--orca-text-secondary, var(--orca-color-text-2))",
                       padding: "0 6px",
                       transition: "all 0.15s",
                     },
@@ -675,7 +678,7 @@ export class SnippetManager {
                     height: "30px",
                     width: "60px",
                     cursor: "pointer",
-                    color: snippetType === "js" ? "var(--orca-primary-color, #007bff)" : "var(--orca-text-secondary, #666)",
+                    color: snippetType === "js" ? "var(--orca-primary-color, var(--orca-color-primary-5))" : "var(--orca-text-secondary, var(--orca-color-text-2))",
                     fontWeight: snippetType === "js" ? 600 : 400,
                     transition: "all 0.2s",
                     zIndex: 2,
@@ -695,11 +698,11 @@ export class SnippetManager {
                       marginLeft: "0.4em",
                       borderRadius: "4px",
                       backgroundColor: snippetType === "js" 
-                        ? "var(--orca-primary-color, #007bff)"
-                        : "var(--orca-bg-primary, #fff)",
+                        ? "var(--orca-primary-color, var(--orca-color-primary-5))"
+                        : "transparent",
                       color: snippetType === "js" 
                         ? "#fff" 
-                        : "var(--orca-text-secondary, #666)",
+                        : "var(--orca-text-secondary, var(--orca-color-text-2))",
                       padding: "0 6px",
                       transition: "all 0.15s",
                     },
@@ -716,16 +719,27 @@ export class SnippetManager {
                     top: "4px",
                     height: "22px",
                     width: "60px",
-                    backgroundColor: "var(--orca-bg-primary, #fff)",
+                    backgroundColor: "var(--orca-bg-primary, var(--orca-color-bg-1))",
                     borderRadius: "4px",
                     zIndex: 1,
                     transition: "transform 0.25s ease-out",
-                    transform: snippetType === "css" ? "translateX(0)" : "translateX(100%)",
+                    transform: snippetType === "js" ? "translateX(60px)" : "translateX(0)",
                   },
                 }
               )
             ),
             React.createElement("span", { style: { flex: 1 } }),
+            // 重新加载界面按钮
+            React.createElement(Button, {
+              variant: "plain",
+              onClick: (e: any) => {
+                e?.stopPropagation();
+                e?.preventDefault();
+                location.reload();
+              },
+              style: { padding: "4px" },
+              title: "Reload UI",
+            }, React.createElement("i", { className: "ti ti-refresh" })),
             // 搜索按钮
             React.createElement(Button, {
               variant: "plain",
@@ -739,7 +753,6 @@ export class SnippetManager {
               onClick: (e: any) => {
                 e?.stopPropagation();
                 e?.preventDefault();
-                console.log(`[${this.pluginName}] Add button clicked`);
                 handleClose();
                 setTimeout(() => {
                   openAddDialog(() => {});
@@ -754,7 +767,6 @@ export class SnippetManager {
               onClick: (e: any) => {
                 e?.stopPropagation();
                 e?.preventDefault();
-                console.log(`[${this.pluginName}] Close button clicked`);
                 handleClose();
               },
               style: { padding: "4px" },
@@ -764,11 +776,11 @@ export class SnippetManager {
           showSearch ? React.createElement(
             "div",
             {
-              style: {
-                padding: "8px 16px",
-                borderBottom: "1px solid var(--orca-border-color, #e0e0e0)",
-              },
+            style: {
+              padding: "8px 16px",
+              borderBottom: "1px solid var(--orca-border-color, var(--orca-color-border))",
             },
+          },
             React.createElement(Input, {
               placeholder: "Search snippets...",
               value: searchQuery,
@@ -784,7 +796,7 @@ export class SnippetManager {
                 flex: 1,
                 overflow: "auto",
                 padding: "4px 0",
-                backgroundColor: "var(--orca-bg-primary, #fff)",
+                backgroundColor: "var(--orca-bg-primary, var(--orca-color-bg-1))",
               },
             },
             filteredSnippets.length === 0
@@ -793,8 +805,8 @@ export class SnippetManager {
                   {
                     style: {
                       textAlign: "center",
-                      padding: "40px",
-                      color: "var(--orca-text-secondary, #666)",
+                      padding: "20px",
+                      color: "var(--orca-text-secondary, var(--orca-color-text-2))",
                     },
                   },
                   snippetType === "css" 
@@ -827,14 +839,14 @@ export class SnippetManager {
                             }, 100);
                           },
                           style: {
-                            padding: "0 6px",
+                            padding: "0 10px",
                             display: "flex",
                             alignItems: "center",
                             gap: "8px",
                             cursor: "pointer",
                             transition: "background-color 0.2s",
                             backgroundColor: hovered 
-                              ? "var(--orca-bg-hover, rgba(0,0,0,0.05))" 
+                              ? "var(--orca-bg-hover, var(--orca-color-bg-2))" 
                               : "transparent",
                           },
                         },
@@ -844,12 +856,12 @@ export class SnippetManager {
                           {
                             style: {
                               flex: 1,
-                              fontSize: "14px",
-                              color: "var(--orca-text-primary, #000)",
+                              fontSize: "13px",
+                              color: "var(--orca-text-primary, var(--orca-color-text-1))",
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
-                              padding: "8px 0",
+                              padding: "6px 0",
                             },
                             title: snippet.name || snippet.content.slice(0, 200),
                           },
@@ -865,7 +877,6 @@ export class SnippetManager {
                             onClick: (e: any) => {
                               e?.stopPropagation();
                               e?.preventDefault();
-                              console.log(`[${this.pluginName}] Edit button clicked for snippet:`, snippet.name);
                               handleClose();
                               setTimeout(() => {
                                 openEditDialog(snippet, () => {});
@@ -902,8 +913,7 @@ export class SnippetManager {
                         // 启用开关
                         React.createElement(Switch, {
                           on: snippet.enabled,
-                          onChange: (e: any) => {
-                            e?.stopPropagation();
+                          onChange: () => {
                             handleToggle(snippet.id);
                           },
                         })
@@ -921,11 +931,8 @@ export class SnippetManager {
     // 尝试多种选择器来找到按钮
     let headbarButton: HTMLElement | null = null;
     
-    console.log(`[${this.pluginName}] Looking for headbar button...`);
-    
     // 方法1: 通过 data-plugin-button 属性
     headbarButton = document.querySelector(`button[data-plugin-button="${this.pluginName}.headbarButton"]`) as HTMLElement;
-    console.log(`[${this.pluginName}] Method 1 result:`, !!headbarButton);
     
     // 方法2: 通过查找包含 ti-code 图标的按钮
     if (!headbarButton) {
@@ -934,7 +941,6 @@ export class SnippetManager {
         const icon = btn.querySelector('i.ti-code, i[class*="code"]');
         if (icon) {
           headbarButton = btn as HTMLElement;
-          console.log(`[${this.pluginName}] Found button by icon:`, btn);
           break;
         }
       }
@@ -942,7 +948,6 @@ export class SnippetManager {
     
     // 方法3: 创建临时锚点
     if (!headbarButton) {
-      console.warn(`[${this.pluginName}] Cannot find headbar button, creating temporary anchor`);
       // 创建一个临时元素作为锚点，放在右上角
       const tempAnchor = document.createElement('div');
       tempAnchor.id = `${this.pluginName}-temp-anchor`;
@@ -955,8 +960,6 @@ export class SnippetManager {
       document.body.appendChild(tempAnchor);
       headbarButton = tempAnchor;
     }
-    
-    console.log(`[${this.pluginName}] Using button element:`, headbarButton);
     
     // 创建或更新按钮引用
     if (!this.managerButtonRef) {
@@ -983,7 +986,7 @@ export class SnippetManager {
         try {
           oldRoot.unmount();
         } catch (e) {
-          console.warn(`[${this.pluginName}] Error unmounting old edit root:`, e);
+          // Error unmounting old edit root
         }
       }
       editContainer.remove();
@@ -1018,7 +1021,6 @@ export class SnippetManager {
       
       // 如果还是找不到，创建临时锚点
       if (!foundButton) {
-        console.warn(`[${this.pluginName}] Cannot find button, creating temporary anchor`);
         foundButton = document.createElement('div');
         foundButton.id = `${this.pluginName}-temp-anchor`;
         foundButton.style.position = 'fixed';
@@ -1037,14 +1039,9 @@ export class SnippetManager {
       
       this.managerPopupVisible = true;
       
-      console.log(`[${this.pluginName}] Rendering ManagerMenu...`);
-      console.log(`[${this.pluginName}] Button element:`, foundButton);
-      
       try {
         root.render(React.createElement(ManagerMenu));
-        console.log(`[${this.pluginName}] ManagerMenu rendered successfully`);
       } catch (error: any) {
-        console.error(`[${this.pluginName}] Error rendering ManagerMenu:`, error);
         orca.notify("error", `Failed to open manager: ${error?.message || String(error)}`, { title: "Error" });
       }
     };
@@ -1069,6 +1066,59 @@ export class SnippetManager {
         enabled: true,
       });
       const [editVisible, setEditVisible] = React.useState(false);
+      const editorRef = React.useRef<EditorView | null>(null);
+      const containerRef = React.useRef<HTMLDivElement | null>(null);
+
+      // 创建 CodeMirror 编辑器扩展
+      const createEditorExtensions = (language: "css" | "js") => {
+        const languageSupport = language === "js" ? javascript() : css();
+        const theme = orca.state.themeMode === "dark" ? oneDark : undefined;
+        
+        return [
+          lineNumbers(),
+          highlightSpecialChars(),
+          history(),
+          foldGutter(),
+          drawSelection(),
+          dropCursor(),
+          EditorState.allowMultipleSelections.of(true),
+          indentOnInput(),
+          syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+          bracketMatching(),
+          closeBrackets(),
+          rectangularSelection(),
+          crosshairCursor(),
+          highlightActiveLine(),
+          highlightSelectionMatches(),
+          indentUnit.of("  "),
+          keymap.of([
+            ...closeBracketsKeymap,
+            ...defaultKeymap,
+            ...searchKeymap,
+            ...historyKeymap,
+            ...foldKeymap,
+            indentWithTab,
+          ]),
+          languageSupport,
+          ...(theme ? [theme] : []),
+        ];
+      };
+
+      // 创建 CodeMirror 编辑器
+      const createCodeMirrorEditor = (container: HTMLElement, content: string, language: "css" | "js") => {
+        const state = EditorState.create({
+          doc: content,
+          extensions: createEditorExtensions(language),
+        });
+
+        const view = new EditorView({
+          state,
+          parent: container,
+        });
+
+        editorRef.current = view;
+        return view;
+      };
 
       // 监听打开编辑对话框的事件（使用 useRef 避免重复注册）
       const eventHandledRef = React.useRef(false);
@@ -1081,7 +1131,6 @@ export class SnippetManager {
         eventHandledRef.current = true;
         
         const handleOpenEdit = (e: CustomEvent) => {
-          console.log(`[${this.pluginName}] EditDialog received open-edit event:`, e.detail);
           // 如果已经有对话框打开，先关闭
           if (editVisible) {
             setEditVisible(false);
@@ -1130,7 +1179,6 @@ export class SnippetManager {
         };
 
         const handleCloseEdit = () => {
-          console.log(`[${this.pluginName}] EditDialog received close-edit event`);
           setIsAdding(false);
           setEditingSnippet(null);
           setEditVisible(false);
@@ -1147,14 +1195,36 @@ export class SnippetManager {
         };
       }, []);
 
+      // 初始化 CodeMirror 编辑器
+      React.useEffect(() => {
+        if (!containerRef.current || !editVisible) return;
+        
+        // 销毁旧的编辑器
+        if (editorRef.current) {
+          editorRef.current.destroy();
+          editorRef.current = null;
+        }
+        
+        // 创建新的编辑器
+        createCodeMirrorEditor(containerRef.current, formData.content, formData.type);
+        
+        return () => {
+          if (editorRef.current) {
+            editorRef.current.destroy();
+            editorRef.current = null;
+          }
+        };
+      }, [editVisible, formData.type]);
+
       const handleAdd = async () => {
-        if (!formData.name.trim() || !formData.content.trim()) {
+        const content = editorRef.current ? editorRef.current.state.doc.toString() : formData.content;
+        if (!formData.name.trim() || !content.trim()) {
           orca.notify("error", "Name and content are required");
           return;
         }
 
         try {
-          await this.addSnippet(formData);
+          await this.addSnippet({ ...formData, content });
           orca.notify("success", "Snippet added successfully");
           setIsAdding(false);
           setEditVisible(false);
@@ -1167,14 +1237,15 @@ export class SnippetManager {
 
       const handleEdit = async () => {
         if (!editingSnippet) return;
-
-        if (!formData.name.trim() || !formData.content.trim()) {
+        
+        const content = editorRef.current ? editorRef.current.state.doc.toString() : formData.content;
+        if (!formData.name.trim() || !content.trim()) {
           orca.notify("error", "Name and content are required");
           return;
         }
 
         try {
-          await this.updateSnippet(editingSnippet.id, formData);
+          await this.updateSnippet(editingSnippet.id, { ...formData, content });
           orca.notify("success", "Snippet updated successfully");
           setEditingSnippet(null);
           setEditVisible(false);
@@ -1205,43 +1276,24 @@ export class SnippetManager {
           {
             style: {
               width: "85vw",
-              maxWidth: "900px",
-              height: "85vh",
-              maxHeight: "700px",
-              backgroundColor: "var(--orca-bg-primary, #fff)",
-              borderRadius: "8px",
+              maxWidth: "800px",
+              height: "80vh",
+              maxHeight: "600px",
+              backgroundColor: "var(--orca-bg-primary, var(--orca-color-bg-1))",
+              borderRadius: "var(--orca-radius-md)",
               padding: "12px",
               display: "flex",
               flexDirection: "column",
-              gap: "10px",
-              boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+              gap: "8px",
+              boxShadow: "var(--orca-shadow-popup)",
+              border: "1px solid var(--orca-border-color, var(--orca-color-border))",
               position: "relative",
               overflow: "hidden",
               boxSizing: "border-box",
             },
           },
-          // 标题栏（只在添加时显示，编辑时不显示标题）
-          isAdding ? React.createElement(
-            "div",
-            {
-              style: {
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: "8px",
-              },
-            },
-            React.createElement(
-              "h3",
-              { style: { margin: 0, fontSize: "18px", fontWeight: 600 } },
-              "Add Snippet"
-            ),
-            React.createElement(Button, {
-              variant: "plain",
-              onClick: closeEditDialog,
-              style: { padding: "4px" },
-            }, React.createElement("i", { className: "ti ti-x" }))
-          ) : React.createElement(
+          // 关闭按钮
+          React.createElement(
             "div",
             {
               style: {
@@ -1257,19 +1309,6 @@ export class SnippetManager {
               onClick: closeEditDialog,
               style: { padding: "4px" },
             }, React.createElement("i", { className: "ti ti-x" }))
-          ),
-          // 标题输入框
-          React.createElement(
-            "label",
-            {
-              style: {
-                fontSize: "13px",
-                fontWeight: 500,
-                color: "var(--orca-text-primary, #000)",
-                marginBottom: "2px",
-              },
-            },
-            "Title"
           ),
           React.createElement(Input, {
             placeholder: "Snippet name",
@@ -1293,7 +1332,7 @@ export class SnippetManager {
                 style: {
                   fontSize: "13px",
                   fontWeight: 500,
-                  color: "var(--orca-text-primary, #000)",
+                  color: "var(--orca-text-primary)",
                 },
               },
               "Type"
@@ -1346,40 +1385,20 @@ export class SnippetManager {
                 flexDirection: "column",
                 gap: "6px",
                 flex: 1,
-                minHeight: "250px",
+                minHeight: "200px",
                 overflow: "hidden",
               },
             },
-            React.createElement(
-              "label",
-              {
-                style: {
-                  fontSize: "13px",
-                  fontWeight: 500,
-                  color: "var(--orca-text-primary, #000)",
-                },
-              },
-              "Code"
-            ),
-            React.createElement("textarea", {
-              value: formData.content,
-              onChange: (e: any) =>
-                setFormData({ ...formData, content: e.target.value }),
-              placeholder: `Enter ${formData.type.toUpperCase()} code...`,
+            React.createElement("div", {
+              ref: containerRef,
               style: {
                 width: "100%",
                 flex: 1,
-                padding: "10px",
-                fontFamily: "monospace",
-                fontSize: "13px",
-                border: "1px solid var(--orca-border-color, #e0e0e0)",
+                border: "1px solid var(--orca-border-color, var(--orca-color-border))",
                 borderRadius: "4px",
-                resize: "none",
-                backgroundColor: "var(--orca-bg-primary, #fff)",
-                color: "var(--orca-text-primary, #000)",
-                boxSizing: "border-box",
-                overflow: "auto",
-                minHeight: "180px",
+                overflow: "hidden",
+                minHeight: "150px",
+                fontSize: "13px",
               },
             })
           ),
@@ -1395,8 +1414,9 @@ export class SnippetManager {
             },
             React.createElement(Switch, {
               on: formData.enabled,
-              onChange: (on: boolean) =>
-                setFormData({ ...formData, enabled: on }),
+              onChange: (on: boolean) => {
+                setFormData({ ...formData, enabled: on });
+              },
             }),
             React.createElement("span", null, "Enable immediately")
           ),

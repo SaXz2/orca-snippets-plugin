@@ -115,5 +115,6 @@ orca.headbar.registerHeadbarButton(`${pluginName}.headbarButton`, renderFn);
 1. **安全**：JavaScript 代码会直接执行，需要注意安全性
 2. **性能**：大量代码片段可能影响性能，考虑按需加载
 3. **冲突**：代码片段之间可能存在变量/函数名冲突
-4. **错误处理**：完善的错误提示和异常处理
+4. **JavaScript 清理**：JavaScript 代码片段在执行后无法自动清理其副作用。如果需要在关闭时清理，请在代码片段中自行实现清理逻辑
+5. **错误处理**：完善的错误提示和异常处理
 

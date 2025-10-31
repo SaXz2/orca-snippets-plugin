@@ -10,6 +10,21 @@ export async function load(_name: string) {
 
   setupL10N(orca.state.locale, { "zh-CN": zhCN });
 
+  // 注入 CodeMirror CSS
+  if (!document.getElementById(`${pluginName}-codemirror-styles`)) {
+    const style = document.createElement("style");
+    style.id = `${pluginName}-codemirror-styles`;
+    style.textContent = `
+      .cm-editor {
+        height: 100% !important;
+      }
+      .cm-scroller {
+        overflow: auto !important;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
   // 初始化代码片段管理器
   snippetManager = new SnippetManager(pluginName);
   await snippetManager.init();
@@ -30,16 +45,13 @@ export async function load(_name: string) {
   orca.headbar.registerHeadbarButton(`${pluginName}.headbarButton`, () => {
     const Button = orca.components.Button;
     const React = window.React;
-    console.log(`[${pluginName}] Registering headbar button`);
     return React.createElement(
       Button,
       {
         variant: "plain",
         onClick: (e: any) => {
-          console.log(`[${pluginName}] Headbar button clicked`, e);
           e?.stopPropagation();
           snippetManager.openManager().catch((error) => {
-            console.error(`[${pluginName}] Error opening manager:`, error);
             orca.notify("error", `Failed to open manager: ${error.message}`);
           });
         },
@@ -48,8 +60,6 @@ export async function load(_name: string) {
       React.createElement("i", { className: "ti ti-code" })
     );
   });
-
-  console.log(`${pluginName} loaded.`);
 }
 
 export async function unload() {
@@ -63,6 +73,4 @@ export async function unload() {
 
   // 取消注册顶栏按钮
   orca.headbar.unregisterHeadbarButton(`${pluginName}.headbarButton`);
-
-  console.log(`${pluginName} unloaded.`);
 }
