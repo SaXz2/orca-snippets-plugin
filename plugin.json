@@ -1,0 +1,23 @@
+{
+  "name": "orca-snippets-plugin",
+  "author": "Your Name",
+  "version": "1.0.0",
+  "displayName": {
+    "default": "Code Snippets Manager",
+    "zh_CN": "代码片段管理器"
+  },
+  "description": {
+    "default": "Manage and inject CSS and JavaScript code snippets",
+    "zh_CN": "管理与注入 CSS 和 JavaScript 代码片段"
+  },
+  "keywords": [
+    "css",
+    "js",
+    "javascript",
+    "snippets",
+    "code manager",
+    "代码片段",
+    "代码管理器"
+  ]
+}
+
