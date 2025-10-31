@@ -30,11 +30,19 @@ export async function load(_name: string) {
   orca.headbar.registerHeadbarButton(`${pluginName}.headbarButton`, () => {
     const Button = orca.components.Button;
     const React = window.React;
+    console.log(`[${pluginName}] Registering headbar button`);
     return React.createElement(
       Button,
       {
         variant: "plain",
-        onClick: () => snippetManager.openManager(),
+        onClick: (e: any) => {
+          console.log(`[${pluginName}] Headbar button clicked`, e);
+          e?.stopPropagation();
+          snippetManager.openManager().catch((error) => {
+            console.error(`[${pluginName}] Error opening manager:`, error);
+            orca.notify("error", `Failed to open manager: ${error.message}`);
+          });
+        },
         title: t("openSnippetsManager", {}, orca.state.locale === "zh-CN" ? "zh-CN" : "en"),
       },
       React.createElement("i", { className: "ti ti-code" })

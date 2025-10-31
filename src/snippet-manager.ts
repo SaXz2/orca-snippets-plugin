@@ -310,25 +310,64 @@ export class SnippetManager {
     return this.snippets.get(snippetId);
   }
 
+  // 管理弹出菜单的状态
+  private managerPopupVisible = false;
+  private managerButtonRef: React.RefObject<HTMLElement> | null = null;
+
   /**
    * 打开代码片段管理器
    */
   async openManager() {
+    console.log(`[${this.pluginName}] openManager called`);
+    
     const React = window.React;
+    if (!React) {
+      console.error(`[${this.pluginName}] React is not available`);
+      return;
+    }
+    
     const Button = orca.components.Button;
     const Input = orca.components.Input;
     const Select = orca.components.Select;
     const Segmented = orca.components.Segmented;
     const Switch = orca.components.Switch;
+    const Popup = orca.components.Popup;
     const ModalOverlay = orca.components.ModalOverlay;
     const ConfirmBox = orca.components.ConfirmBox;
+    const Menu = orca.components.Menu;
+    const MenuText = orca.components.MenuText;
 
-    const ManagerDialog = () => {
+    console.log(`[${this.pluginName}] Components loaded, Popup:`, !!Popup);
+
+    // 如果已经有打开的菜单，先关闭
+    if (this.managerPopupVisible) {
+      console.log(`[${this.pluginName}] Menu already visible, closing`);
+      this.managerPopupVisible = false;
+      // 清理容器
+      const container = document.getElementById(`${this.pluginName}-manager-container`);
+      if (container) {
+        const root = (container as any)._reactRootContainer;
+        if (root) {
+          root.unmount();
+        }
+        container.remove();
+      }
+      return;
+    }
+
+    // 创建一个按钮引用用于定位 Popup
+    if (!this.managerButtonRef) {
+      this.managerButtonRef = React.createRef<HTMLElement>();
+    }
+
+    const ManagerMenu = () => {
       const [snippets, setSnippets] = React.useState<Snippet[]>(
         this.getAllSnippets()
       );
       const [visible, setVisible] = React.useState(true);
-      const [filterType, setFilterType] = React.useState<"all" | "css" | "js">("all");
+      const [snippetType, setSnippetType] = React.useState<"css" | "js">("css");
+      const [searchQuery, setSearchQuery] = React.useState("");
+      const [showSearch, setShowSearch] = React.useState(false);
 
       // 监听刷新事件
       React.useEffect(() => {
@@ -341,7 +380,20 @@ export class SnippetManager {
         };
       }, []);
 
-      const handleDelete = async (snippetId: string) => {
+      // 计算计数
+      const cssCount = snippets.filter((s: Snippet) => s.type === "css").length;
+      const jsCount = snippets.filter((s: Snippet) => s.type === "js").length;
+      
+      // 筛选代码片段
+      const filteredSnippets = snippets.filter((snippet: Snippet) => {
+        const typeMatch = snippet.type === snippetType;
+        const searchMatch = !searchQuery || 
+          snippet.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          snippet.content.toLowerCase().includes(searchQuery.toLowerCase());
+        return typeMatch && searchMatch;
+      });
+
+      const handleDelete = async (snippetId: string, close: () => void) => {
         try {
           await this.deleteSnippet(snippetId);
           orca.notify("success", "Snippet deleted successfully");
@@ -360,102 +412,354 @@ export class SnippetManager {
         }
       };
 
-      const openAddDialog = () => {
+      const openAddDialog = (close: () => void) => {
+        close();
         window.dispatchEvent(new CustomEvent(`${this.pluginName}-open-edit`, {
-          detail: { type: "add" }
+          detail: { type: "add", defaultType: snippetType }
         }));
       };
 
-      const openEditDialog = (snippet: Snippet) => {
+      const openEditDialog = (snippet: Snippet, close: () => void) => {
+        close();
         window.dispatchEvent(new CustomEvent(`${this.pluginName}-open-edit`, {
           detail: { type: "edit", snippet }
         }));
       };
 
+      const handleClose = () => {
+        console.log(`[${this.pluginName}] Closing manager menu`);
+        setVisible(false);
+        this.managerPopupVisible = false;
+      };
+      
+      // 清理函数：当组件卸载时
+      React.useEffect(() => {
+        return () => {
+          if (!visible) {
+            this.managerPopupVisible = false;
+            // 清理容器
+            const container = document.getElementById(`${this.pluginName}-manager-container`);
+            if (container) {
+              const root = (container as any)._reactRootContainer;
+              if (root) {
+                try {
+                  root.unmount();
+                } catch (e) {
+                  console.warn(`[${this.pluginName}] Error unmounting root:`, e);
+                }
+              }
+            }
+          }
+        };
+      }, [visible]);
+
+      // 获取按钮元素
+      const getButtonElement = (): HTMLElement | null => {
+        let buttonElement: HTMLElement | null = this.managerButtonRef?.current || null;
+        
+        if (!buttonElement) {
+          buttonElement = document.querySelector(`button[data-plugin-button="${this.pluginName}.headbarButton"]`) as HTMLElement;
+        }
+        
+        if (!buttonElement) {
+          const buttons = document.querySelectorAll('button, [role="button"]');
+          for (const btn of Array.from(buttons)) {
+            const icon = btn.querySelector('i.ti-code, i[class*="code"]');
+            if (icon) {
+              buttonElement = btn as HTMLElement;
+              break;
+            }
+          }
+        }
+        
+        return buttonElement;
+      };
+      
+      // 使用 useState 存储按钮引用
+      const [buttonElement, setButtonElement] = React.useState<HTMLElement | null>(() => getButtonElement());
+      const buttonRef = React.useRef<HTMLElement | null>(buttonElement);
+      
+      React.useEffect(() => {
+        // 更新按钮引用
+        const element = getButtonElement();
+        if (element) {
+          buttonRef.current = element;
+          setButtonElement(element);
+        }
+        // 延迟再更新一次，确保DOM已完全更新
+        const timer = setTimeout(() => {
+          const element = getButtonElement();
+          if (element) {
+            buttonRef.current = element;
+            setButtonElement(element);
+          }
+        }, 50);
+        return () => clearTimeout(timer);
+      }, [visible]);
+      
+      // 如果按钮元素不存在或不可见，不显示 Popup
+      const currentButton = buttonElement || getButtonElement();
+      if (!currentButton || !visible) {
+        console.log(`[${this.pluginName}] Popup not shown - button:`, !!currentButton, `visible:`, visible);
+        return null;
+      }
+      
+      // 更新 ref
+      buttonRef.current = currentButton;
+      
+      console.log(`[${this.pluginName}] Rendering Popup with button:`, currentButton);
       return React.createElement(
-        ModalOverlay,
+        Popup,
         {
+          refElement: buttonRef as any,
           visible: visible,
-          canClose: true,
-          onClose: () => setVisible(false),
-          style: { zIndex: 10000 },
+          onClose: () => {
+            console.log(`[${this.pluginName}] Popup onClose called`);
+            handleClose();
+          },
+          onClosed: () => {
+            console.log(`[${this.pluginName}] Popup onClosed called`);
+            this.managerPopupVisible = false;
+            // 确保状态清理
+            setVisible(false);
+          },
+          escapeToClose: true,
+          defaultPlacement: "bottom",
+          alignment: "center",
+          style: { 
+            width: "min(400px, 90vw)",
+            maxHeight: "80vh",
+          },
+          className: `${this.pluginName}-manager-popup`,
         },
         React.createElement(
           "div",
           {
             style: {
-              width: "90vw",
-              maxWidth: "1200px",
-              height: "90vh",
-              maxHeight: "800px",
+              width: "min(400px, 90vw)",
+              maxHeight: "80vh",
               backgroundColor: "var(--orca-bg-primary, #fff)",
               borderRadius: "8px",
               display: "flex",
               flexDirection: "column",
               overflow: "hidden",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
             },
           },
-          // 头部
+          // 顶部容器（参考插件的设计）
           React.createElement(
             "div",
             {
               style: {
-                padding: "16px 24px",
+                padding: "10px 16px",
                 borderBottom: "1px solid var(--orca-border-color, #e0e0e0)",
                 display: "flex",
-                justifyContent: "space-between",
                 alignItems: "center",
+                gap: "8px",
+                userSelect: "none",
               },
             },
-          React.createElement(
-            "h2",
-            { style: { margin: 0, fontSize: "20px", fontWeight: 600 } },
-            "Code Snippets Manager"
-          ),
-          React.createElement(
-            "div",
-            { style: { display: "flex", gap: "8px", alignItems: "center" } },
-            // 筛选按钮
+            // CSS/JS 标签切换
             React.createElement(
               "div",
-              { style: { display: "flex", gap: "4px", marginRight: "8px" } },
-              React.createElement(Button, {
-                variant: filterType === "all" ? "solid" : "outline",
-                onClick: () => setFilterType("all"),
-                style: { padding: "4px 12px", fontSize: "12px" },
-              }, "All"),
-              React.createElement(Button, {
-                variant: filterType === "css" ? "solid" : "outline",
-                onClick: () => setFilterType("css"),
-                style: { padding: "4px 12px", fontSize: "12px" },
-              }, React.createElement("i", { className: "ti ti-brand-css3", style: { marginRight: "4px" } }), "CSS"),
-              React.createElement(Button, {
-                variant: filterType === "js" ? "solid" : "outline",
-                onClick: () => setFilterType("js"),
-                style: { padding: "4px 12px", fontSize: "12px" },
-              }, React.createElement("i", { className: "ti ti-brand-javascript", style: { marginRight: "4px" } }), "JS")
+              {
+                style: {
+                  display: "flex",
+                  position: "relative",
+                  padding: "0 6px",
+                  borderRadius: "6px",
+                  backgroundColor: "var(--orca-bg-secondary, #f5f5f5)",
+                },
+              },
+              React.createElement(
+                "input",
+                {
+                  type: "radio",
+                  id: `${this.pluginName}-radio-css`,
+                  name: `${this.pluginName}-tabs`,
+                  checked: snippetType === "css",
+                  onChange: () => setSnippetType("css"),
+                  style: { display: "none" },
+                }
+              ),
+              React.createElement(
+                "label",
+                {
+                  htmlFor: `${this.pluginName}-radio-css`,
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    height: "30px",
+                    width: "60px",
+                    cursor: "pointer",
+                    color: snippetType === "css" ? "var(--orca-primary-color, #007bff)" : "var(--orca-text-secondary, #666)",
+                    fontWeight: snippetType === "css" ? 600 : 400,
+                    transition: "all 0.2s",
+                    zIndex: 2,
+                  },
+                },
+                React.createElement("span", null, "CSS"),
+                React.createElement(
+                  "span",
+                  {
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: "0.8em",
+                      minWidth: "1.5em",
+                      height: "1.25em",
+                      marginLeft: "0.4em",
+                      borderRadius: "4px",
+                      backgroundColor: snippetType === "css" 
+                        ? "var(--orca-primary-color, #007bff)"
+                        : "var(--orca-bg-primary, #fff)",
+                      color: snippetType === "css" 
+                        ? "#fff" 
+                        : "var(--orca-text-secondary, #666)",
+                      padding: "0 6px",
+                      transition: "all 0.15s",
+                    },
+                  },
+                  cssCount > 99 ? "99+" : cssCount.toString()
+                )
+              ),
+              React.createElement(
+                "input",
+                {
+                  type: "radio",
+                  id: `${this.pluginName}-radio-js`,
+                  name: `${this.pluginName}-tabs`,
+                  checked: snippetType === "js",
+                  onChange: () => setSnippetType("js"),
+                  style: { display: "none" },
+                }
+              ),
+              React.createElement(
+                "label",
+                {
+                  htmlFor: `${this.pluginName}-radio-js`,
+                  style: {
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    height: "30px",
+                    width: "60px",
+                    cursor: "pointer",
+                    color: snippetType === "js" ? "var(--orca-primary-color, #007bff)" : "var(--orca-text-secondary, #666)",
+                    fontWeight: snippetType === "js" ? 600 : 400,
+                    transition: "all 0.2s",
+                    zIndex: 2,
+                  },
+                },
+                React.createElement("span", { style: { paddingLeft: "0.2em" } }, "JS"),
+                React.createElement(
+                  "span",
+                  {
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: "0.8em",
+                      minWidth: "1.5em",
+                      height: "1.25em",
+                      marginLeft: "0.4em",
+                      borderRadius: "4px",
+                      backgroundColor: snippetType === "js" 
+                        ? "var(--orca-primary-color, #007bff)"
+                        : "var(--orca-bg-primary, #fff)",
+                      color: snippetType === "js" 
+                        ? "#fff" 
+                        : "var(--orca-text-secondary, #666)",
+                      padding: "0 6px",
+                      transition: "all 0.15s",
+                    },
+                  },
+                  jsCount > 99 ? "99+" : jsCount.toString()
+                )
+              ),
+              // 滑动指示器
+              React.createElement(
+                "span",
+                {
+                  style: {
+                    position: "absolute",
+                    top: "4px",
+                    height: "22px",
+                    width: "60px",
+                    backgroundColor: "var(--orca-bg-primary, #fff)",
+                    borderRadius: "4px",
+                    zIndex: 1,
+                    transition: "transform 0.25s ease-out",
+                    transform: snippetType === "css" ? "translateX(0)" : "translateX(100%)",
+                  },
+                }
+              )
             ),
-            React.createElement(Button, {
-              variant: "outline",
-              onClick: openAddDialog,
-            }, "Add Snippet"),
+            React.createElement("span", { style: { flex: 1 } }),
+            // 搜索按钮
             React.createElement(Button, {
               variant: "plain",
-              onClick: () => setVisible(false),
+              onClick: () => setShowSearch(!showSearch),
+              style: { padding: "4px" },
+              title: "Search",
+            }, React.createElement("i", { className: "ti ti-search" })),
+            // 添加按钮
+            React.createElement(Button, {
+              variant: "plain",
+              onClick: (e: any) => {
+                e?.stopPropagation();
+                e?.preventDefault();
+                console.log(`[${this.pluginName}] Add button clicked`);
+                handleClose();
+                setTimeout(() => {
+                  openAddDialog(() => {});
+                }, 100);
+              },
+              style: { padding: "4px" },
+              title: "Add Snippet",
+            }, React.createElement("i", { className: "ti ti-plus" })),
+            // 关闭按钮
+            React.createElement(Button, {
+              variant: "plain",
+              onClick: (e: any) => {
+                e?.stopPropagation();
+                e?.preventDefault();
+                console.log(`[${this.pluginName}] Close button clicked`);
+                handleClose();
+              },
+              style: { padding: "4px" },
             }, React.createElement("i", { className: "ti ti-x" }))
-          )
           ),
-          // 内容区域
+          // 搜索输入框
+          showSearch ? React.createElement(
+            "div",
+            {
+              style: {
+                padding: "8px 16px",
+                borderBottom: "1px solid var(--orca-border-color, #e0e0e0)",
+              },
+            },
+            React.createElement(Input, {
+              placeholder: "Search snippets...",
+              value: searchQuery,
+              onChange: (e: any) => setSearchQuery(e.target.value),
+              style: { width: "100%" },
+            })
+          ) : null,
+          // 内容区域（简洁的列表样式）
           React.createElement(
             "div",
             {
               style: {
                 flex: 1,
                 overflow: "auto",
-                padding: "24px",
+                padding: "4px 0",
+                backgroundColor: "var(--orca-bg-primary, #fff)",
               },
             },
-            snippets.length === 0
+            filteredSnippets.length === 0
               ? React.createElement(
                   "div",
                   {
@@ -465,182 +769,177 @@ export class SnippetManager {
                       color: "var(--orca-text-secondary, #666)",
                     },
                   },
-                  'No snippets yet. Click "Add Snippet" to create one.'
+                  snippetType === "css" 
+                    ? 'No CSS snippets yet. Click "+" to add one.'
+                    : 'No JavaScript snippets yet. Click "+" to add one.'
                 )
               : React.createElement(
                   "div",
-                  {
-                    style: { display: "flex", flexDirection: "column", gap: "12px" },
-                  },
-                  snippets
-                    .filter((snippet: Snippet) => 
-                      filterType === "all" || snippet.type === filterType
-                    )
-                    .map((snippet: Snippet) =>
-                    React.createElement(
-                      "div",
-                      {
-                        key: snippet.id,
-                        style: {
-                          border: "1px solid var(--orca-border-color, #e0e0e0)",
-                          borderLeft: `4px solid ${
-                            snippet.type === "css"
-                              ? "var(--orca-primary-color, #007bff)"
-                              : "var(--orca-accent-color, #28a745)"
-                          }`,
-                          borderRadius: "6px",
-                          padding: "16px",
-                          backgroundColor: "var(--orca-bg-secondary, #f5f5f5)",
-                        },
-                      },
-                      React.createElement(
+                  null,
+                  filteredSnippets.map((snippet: Snippet) => {
+                    // 使用单独的组件来处理 hover 状态
+                      const SnippetItemComponent = () => {
+                      const [hovered, setHovered] = React.useState(false);
+                      return React.createElement(
                         "div",
                         {
+                          onMouseEnter: () => setHovered(true),
+                          onMouseLeave: () => setHovered(false),
+                          onClick: (e: any) => {
+                            // 如果点击的是按钮，不处理（让按钮自己的 onClick 处理）
+                            if ((e.target as HTMLElement).closest('button')) {
+                              return;
+                            }
+                            // 点击项本身也打开编辑对话框
+                            e?.stopPropagation();
+                            e?.preventDefault();
+                            handleClose();
+                            setTimeout(() => {
+                              openEditDialog(snippet, () => {});
+                            }, 100);
+                          },
                           style: {
+                            padding: "0 6px",
                             display: "flex",
-                            justifyContent: "space-between",
                             alignItems: "center",
-                            marginBottom: "12px",
+                            gap: "8px",
+                            cursor: "pointer",
+                            transition: "background-color 0.2s",
+                            backgroundColor: hovered 
+                              ? "var(--orca-bg-hover, rgba(0,0,0,0.05))" 
+                              : "transparent",
                           },
                         },
+                        // 代码片段名称
                         React.createElement(
-                          "div",
+                          "span",
                           {
                             style: {
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "12px",
+                              flex: 1,
+                              fontSize: "14px",
+                              color: "var(--orca-text-primary, #000)",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                              padding: "8px 0",
                             },
+                            title: snippet.name || snippet.content.slice(0, 200),
                           },
-                          React.createElement(
-                            "div",
-                            { style: { display: "flex", alignItems: "center", gap: "8px" } },
-                            React.createElement("i", {
-                              className: snippet.type === "css" ? "ti ti-brand-css3" : "ti ti-brand-javascript",
-                              style: {
-                                fontSize: "18px",
-                                color: snippet.type === "css"
-                                  ? "var(--orca-primary-color, #007bff)"
-                                  : "var(--orca-accent-color, #28a745)",
-                              },
-                            }),
-                            React.createElement(
-                              "h3",
-                              { style: { margin: 0, fontSize: "16px", flex: 1 } },
-                              snippet.name
-                            )
-                          ),
-                          React.createElement(
-                            "span",
-                            {
-                              style: {
-                                padding: "4px 10px",
-                                borderRadius: "12px",
-                                fontSize: "11px",
-                                fontWeight: 600,
-                                backgroundColor:
-                                  snippet.type === "css"
-                                    ? "var(--orca-primary-color, #007bff)"
-                                    : "var(--orca-accent-color, #28a745)",
-                                color: "#fff",
-                                textTransform: "uppercase",
-                                letterSpacing: "0.5px",
-                              },
-                            },
-                            snippet.type.toUpperCase()
-                          ),
-                          React.createElement(Switch, {
-                            on: snippet.enabled,
-                            onChange: () => handleToggle(snippet.id),
-                          })
+                          snippet.name || snippet.content.slice(0, 50) + (snippet.content.length > 50 ? "..." : "")
                         ),
-                        React.createElement(
+                        React.createElement("span", { style: { flex: 0 } }),
+                        // 操作按钮（hover 时显示）
+                        hovered ? React.createElement(
                           "div",
-                          { style: { display: "flex", gap: "8px" } },
+                          { style: { display: "flex", gap: "4px", alignItems: "center" } },
                           React.createElement(Button, {
-                            variant: "outline",
-                            onClick: () => openEditDialog(snippet),
-                          }, "Edit"),
+                            variant: "plain",
+                            onClick: (e: any) => {
+                              e?.stopPropagation();
+                              e?.preventDefault();
+                              console.log(`[${this.pluginName}] Edit button clicked for snippet:`, snippet.name);
+                              handleClose();
+                              setTimeout(() => {
+                                openEditDialog(snippet, () => {});
+                              }, 100);
+                            },
+                            style: { padding: "4px", minWidth: "auto" },
+                            title: "Edit",
+                          }, React.createElement("i", { className: "ti ti-edit", style: { fontSize: "14px" } })),
                           React.createElement(ConfirmBox, {
-                            text: `Are you sure you want to delete "${snippet.name}"?`,
-                            onConfirm: (e: any, close: () => void) => {
-                              handleDelete(snippet.id);
+                            text: `Are you sure you want to delete "${snippet.name || 'this snippet'}"?`,
+                            onConfirm: async (e: any, close: () => void) => {
+                              e?.stopPropagation();
+                              await handleDelete(snippet.id, close);
                               close();
                             },
                             children: (open: (e: any) => void) =>
                               React.createElement(
                                 Button,
                                 {
-                                  variant: "dangerous",
-                                  onClick: open,
+                                  variant: "plain",
+                                  onClick: (e: any) => {
+                                    e?.stopPropagation();
+                                    e?.preventDefault();
+                                    open(e);
+                                  },
+                                  style: { padding: "4px", minWidth: "auto" },
+                                  title: "Delete",
                                 },
-                                "Delete"
+                                React.createElement("i", { className: "ti ti-trash", style: { fontSize: "14px" } })
                               ),
                           })
-                        )
-                      ),
-                      React.createElement(
-                        "div",
-                        {
-                          style: {
-                            position: "relative",
-                            marginTop: "12px",
+                        ) : null,
+                        React.createElement("span", { style: { width: "8px" } }),
+                        // 启用开关
+                        React.createElement(Switch, {
+                          on: snippet.enabled,
+                          onChange: (e: any) => {
+                            e?.stopPropagation();
+                            handleToggle(snippet.id);
                           },
-                        },
-                        React.createElement(
-                          "div",
-                          {
-                            style: {
-                              position: "absolute",
-                              top: "8px",
-                              right: "8px",
-                              padding: "2px 6px",
-                              borderRadius: "4px",
-                              fontSize: "10px",
-                              backgroundColor: snippet.type === "css"
-                                ? "rgba(0, 123, 255, 0.1)"
-                                : "rgba(40, 167, 69, 0.1)",
-                              color: snippet.type === "css"
-                                ? "var(--orca-primary-color, #007bff)"
-                                : "var(--orca-accent-color, #28a745)",
-                              fontWeight: 600,
-                            },
-                          },
-                          snippet.type.toUpperCase()
-                        ),
-                        React.createElement(
-                          "pre",
-                          {
-                            style: {
-                              margin: 0,
-                              padding: "12px",
-                              paddingTop: "28px",
-                              backgroundColor: "var(--orca-bg-primary, #fff)",
-                              borderRadius: "4px",
-                              fontSize: "12px",
-                              fontFamily: "monospace",
-                              overflow: "auto",
-                              maxHeight: "200px",
-                              border: "1px solid var(--orca-border-color, #e0e0e0)",
-                              borderLeft: `3px solid ${
-                                snippet.type === "css"
-                                  ? "var(--orca-primary-color, #007bff)"
-                                  : "var(--orca-accent-color, #28a745)"
-                              }`,
-                            },
-                          },
-                          snippet.content
-                        )
-                      )
-                    )
-                  )
+                        })
+                      );
+                    };
+                    return React.createElement(SnippetItemComponent, { key: snippet.id });
+                  })
                 )
           )
         )
       );
     };
 
-    // 渲染管理器对话框
+    // 获取顶栏按钮作为 Popup 的锚点
+    // 尝试多种选择器来找到按钮
+    let headbarButton: HTMLElement | null = null;
+    
+    console.log(`[${this.pluginName}] Looking for headbar button...`);
+    
+    // 方法1: 通过 data-plugin-button 属性
+    headbarButton = document.querySelector(`button[data-plugin-button="${this.pluginName}.headbarButton"]`) as HTMLElement;
+    console.log(`[${this.pluginName}] Method 1 result:`, !!headbarButton);
+    
+    // 方法2: 通过查找包含 ti-code 图标的按钮
+    if (!headbarButton) {
+      const buttons = document.querySelectorAll('button, [role="button"]');
+      for (const btn of Array.from(buttons)) {
+        const icon = btn.querySelector('i.ti-code, i[class*="code"]');
+        if (icon) {
+          headbarButton = btn as HTMLElement;
+          console.log(`[${this.pluginName}] Found button by icon:`, btn);
+          break;
+        }
+      }
+    }
+    
+    // 方法3: 创建临时锚点
+    if (!headbarButton) {
+      console.warn(`[${this.pluginName}] Cannot find headbar button, creating temporary anchor`);
+      // 创建一个临时元素作为锚点，放在右上角
+      const tempAnchor = document.createElement('div');
+      tempAnchor.id = `${this.pluginName}-temp-anchor`;
+      tempAnchor.style.position = 'fixed';
+      tempAnchor.style.top = 'var(--orca-height-headbar, 40px)';
+      tempAnchor.style.right = '20px';
+      tempAnchor.style.width = '1px';
+      tempAnchor.style.height = '1px';
+      tempAnchor.style.zIndex = '-1';
+      document.body.appendChild(tempAnchor);
+      headbarButton = tempAnchor;
+    }
+    
+    console.log(`[${this.pluginName}] Using button element:`, headbarButton);
+    
+    // 创建或更新按钮引用
+    if (!this.managerButtonRef) {
+      const buttonRef = React.createRef<HTMLElement>();
+      (buttonRef as any).current = headbarButton;
+      this.managerButtonRef = buttonRef;
+    } else {
+      (this.managerButtonRef as any).current = headbarButton;
+    }
+
+    // 创建临时容器用于渲染
     const container = document.createElement("div");
     container.id = `${this.pluginName}-manager-container`;
     document.body.appendChild(container);
@@ -653,6 +952,65 @@ export class SnippetManager {
     document.body.appendChild(editContainer);
     
     const editRoot = window.createRoot(editContainer);
+
+    // 延迟渲染以确保按钮已经在DOM中
+    const renderMenu = () => {
+      // 重新查找按钮（可能在DOM更新后才存在）
+      let foundButton = headbarButton;
+      
+      if (!foundButton || !(foundButton as HTMLElement).isConnected) {
+        foundButton = document.querySelector(`button[data-plugin-button="${this.pluginName}.headbarButton"]`) as HTMLElement;
+      }
+      
+      if (!foundButton) {
+        const buttons = document.querySelectorAll('button, [role="button"]');
+        for (const btn of Array.from(buttons)) {
+          const icon = btn.querySelector('i.ti-code, i[class*="code"]');
+          if (icon) {
+            foundButton = btn as HTMLElement;
+            break;
+          }
+        }
+      }
+      
+      // 如果还是找不到，创建临时锚点
+      if (!foundButton) {
+        console.warn(`[${this.pluginName}] Cannot find button, creating temporary anchor`);
+        foundButton = document.createElement('div');
+        foundButton.id = `${this.pluginName}-temp-anchor`;
+        foundButton.style.position = 'fixed';
+        foundButton.style.top = 'var(--orca-height-headbar, 40px)';
+        foundButton.style.right = '20px';
+        foundButton.style.width = '1px';
+        foundButton.style.height = '1px';
+        foundButton.style.zIndex = '-1';
+        document.body.appendChild(foundButton);
+      }
+      
+      // 更新引用
+      if (foundButton && this.managerButtonRef) {
+        (this.managerButtonRef as any).current = foundButton;
+      }
+      
+      this.managerPopupVisible = true;
+      
+      console.log(`[${this.pluginName}] Rendering ManagerMenu...`);
+      console.log(`[${this.pluginName}] Button element:`, foundButton);
+      
+      try {
+        root.render(React.createElement(ManagerMenu));
+        console.log(`[${this.pluginName}] ManagerMenu rendered successfully`);
+      } catch (error: any) {
+        console.error(`[${this.pluginName}] Error rendering ManagerMenu:`, error);
+        orca.notify("error", `Failed to open manager: ${error?.message || String(error)}`, { title: "Error" });
+      }
+    };
+    
+    // 立即尝试渲染，如果按钮已存在
+    renderMenu();
+    
+    // 也延迟一下，以防DOM还没更新
+    setTimeout(renderMenu, 10);
 
     // 创建编辑对话框组件
     const EditDialog = () => {
@@ -675,7 +1033,12 @@ export class SnippetManager {
           if (e.detail.type === "add") {
             setIsAdding(true);
             setEditVisible(true);
-            setFormData({ name: "", content: "", type: "css", enabled: true });
+            setFormData({ 
+              name: "", 
+              content: "", 
+              type: e.detail.defaultType || "css", 
+              enabled: true 
+            });
           } else if (e.detail.type === "edit") {
             setEditingSnippet(e.detail.snippet);
             setEditVisible(true);
@@ -761,20 +1124,56 @@ export class SnippetManager {
           "div",
           {
             style: {
-              width: "80vw",
-              maxWidth: "800px",
+              width: "85vw",
+              maxWidth: "900px",
+              height: "85vh",
+              maxHeight: "700px",
               backgroundColor: "var(--orca-bg-primary, #fff)",
               borderRadius: "8px",
-              padding: "24px",
+              padding: "20px",
               display: "flex",
               flexDirection: "column",
               gap: "16px",
+              boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+              position: "relative",
+              overflow: "hidden",
+              boxSizing: "border-box",
             },
           },
+          // 标题栏
           React.createElement(
-            "h3",
-            { style: { margin: 0 } },
-            isAdding ? "Add Snippet" : "Edit Snippet"
+            "div",
+            {
+              style: {
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginBottom: "8px",
+              },
+            },
+            React.createElement(
+              "h3",
+              { style: { margin: 0, fontSize: "18px", fontWeight: 600 } },
+              isAdding ? "Add Snippet" : "Edit Snippet"
+            ),
+            React.createElement(Button, {
+              variant: "plain",
+              onClick: closeEditDialog,
+              style: { padding: "4px" },
+            }, React.createElement("i", { className: "ti ti-x" }))
+          ),
+          // 标题输入框
+          React.createElement(
+            "label",
+            {
+              style: {
+                fontSize: "14px",
+                fontWeight: 500,
+                color: "var(--orca-text-primary, #000)",
+                marginBottom: "4px",
+              },
+            },
+            "Title"
           ),
           React.createElement(Input, {
             placeholder: "Snippet name",
@@ -841,22 +1240,52 @@ export class SnippetManager {
                 }),
             })
           ),
-          React.createElement("textarea", {
-            value: formData.content,
-            onChange: (e: any) =>
-              setFormData({ ...formData, content: e.target.value }),
-            placeholder: `Enter ${formData.type.toUpperCase()} code...`,
-            style: {
-              width: "100%",
-              minHeight: "300px",
-              padding: "12px",
-              fontFamily: "monospace",
-              fontSize: "14px",
-              border: "1px solid var(--orca-border-color, #e0e0e0)",
-              borderRadius: "4px",
-              resize: "vertical",
+          // 代码编辑器区域
+          React.createElement(
+            "div",
+            {
+              style: {
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+                flex: 1,
+                minHeight: "300px",
+                overflow: "hidden",
+              },
             },
-          }),
+            React.createElement(
+              "label",
+              {
+                style: {
+                  fontSize: "14px",
+                  fontWeight: 500,
+                  color: "var(--orca-text-primary, #000)",
+                },
+              },
+              "Code"
+            ),
+            React.createElement("textarea", {
+              value: formData.content,
+              onChange: (e: any) =>
+                setFormData({ ...formData, content: e.target.value }),
+              placeholder: `Enter ${formData.type.toUpperCase()} code...`,
+              style: {
+                width: "100%",
+                flex: 1,
+                padding: "12px",
+                fontFamily: "monospace",
+                fontSize: "14px",
+                border: "1px solid var(--orca-border-color, #e0e0e0)",
+                borderRadius: "4px",
+                resize: "none",
+                backgroundColor: "var(--orca-bg-primary, #fff)",
+                color: "var(--orca-text-primary, #000)",
+                boxSizing: "border-box",
+                overflow: "auto",
+                minHeight: "200px",
+              },
+            })
+          ),
           React.createElement(
             "div",
             {
@@ -880,6 +1309,9 @@ export class SnippetManager {
                 display: "flex",
                 gap: "8px",
                 justifyContent: "flex-end",
+                marginTop: "auto",
+                paddingTop: "8px",
+                flexShrink: 0,
               },
             },
             React.createElement(Button, {
@@ -895,8 +1327,7 @@ export class SnippetManager {
       );
     };
 
-    root.render(React.createElement(ManagerDialog));
-    
     editRoot.render(React.createElement(EditDialog));
   }
 }
+
