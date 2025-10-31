@@ -343,7 +343,7 @@ export class SnippetManager {
     if (this.managerPopupVisible) {
       console.log(`[${this.pluginName}] Menu already visible, closing`);
       this.managerPopupVisible = false;
-      // 清理容器
+      // 清理管理器容器
       const container = document.getElementById(`${this.pluginName}-manager-container`);
       if (container) {
         const root = (container as any)._reactRootContainer;
@@ -352,7 +352,35 @@ export class SnippetManager {
         }
         container.remove();
       }
+      // 清理编辑对话框容器
+      const editContainer = document.getElementById(`${this.pluginName}-edit-container`);
+      if (editContainer) {
+        const editRoot = (editContainer as any)._reactRootContainer;
+        if (editRoot) {
+          try {
+            editRoot.unmount();
+          } catch (e) {
+            console.warn(`[${this.pluginName}] Error unmounting edit root:`, e);
+          }
+        }
+        editContainer.remove();
+      }
       return;
+    }
+    
+    // 清理可能存在的旧编辑对话框容器（如果管理器未打开但编辑对话框还在）
+    const existingEditContainer = document.getElementById(`${this.pluginName}-edit-container`);
+    if (existingEditContainer) {
+      console.log(`[${this.pluginName}] Cleaning up existing edit container`);
+      const existingEditRoot = (existingEditContainer as any)._reactRootContainer;
+      if (existingEditRoot) {
+        try {
+          existingEditRoot.unmount();
+        } catch (e) {
+          console.warn(`[${this.pluginName}] Error unmounting existing edit root:`, e);
+        }
+      }
+      existingEditContainer.remove();
     }
 
     // 创建一个按钮引用用于定位 Popup
@@ -946,12 +974,27 @@ export class SnippetManager {
 
     const root = window.createRoot(container);
     
-    // 创建编辑对话框的独立容器
-    const editContainer = document.createElement("div");
+    // 创建或获取编辑对话框的独立容器（如果已存在则先清理）
+    let editContainer = document.getElementById(`${this.pluginName}-edit-container`);
+    if (editContainer) {
+      // 清理旧的容器和 root
+      const oldRoot = (editContainer as any)._reactRootContainer;
+      if (oldRoot) {
+        try {
+          oldRoot.unmount();
+        } catch (e) {
+          console.warn(`[${this.pluginName}] Error unmounting old edit root:`, e);
+        }
+      }
+      editContainer.remove();
+    }
+    
+    editContainer = document.createElement("div");
     editContainer.id = `${this.pluginName}-edit-container`;
     document.body.appendChild(editContainer);
     
     const editRoot = window.createRoot(editContainer);
+    (editContainer as any)._reactRootContainer = editRoot;
 
     // 延迟渲染以确保按钮已经在DOM中
     const renderMenu = () => {
@@ -1027,31 +1070,67 @@ export class SnippetManager {
       });
       const [editVisible, setEditVisible] = React.useState(false);
 
-      // 监听打开编辑对话框的事件
+      // 监听打开编辑对话框的事件（使用 useRef 避免重复注册）
+      const eventHandledRef = React.useRef(false);
+      
       React.useEffect(() => {
+        // 防止重复注册事件监听器
+        if (eventHandledRef.current) {
+          return;
+        }
+        eventHandledRef.current = true;
+        
         const handleOpenEdit = (e: CustomEvent) => {
-          if (e.detail.type === "add") {
-            setIsAdding(true);
-            setEditVisible(true);
-            setFormData({ 
-              name: "", 
-              content: "", 
-              type: e.detail.defaultType || "css", 
-              enabled: true 
-            });
-          } else if (e.detail.type === "edit") {
-            setEditingSnippet(e.detail.snippet);
-            setEditVisible(true);
-            setFormData({
-              name: e.detail.snippet.name,
-              content: e.detail.snippet.content,
-              type: e.detail.snippet.type,
-              enabled: e.detail.snippet.enabled,
-            });
+          console.log(`[${this.pluginName}] EditDialog received open-edit event:`, e.detail);
+          // 如果已经有对话框打开，先关闭
+          if (editVisible) {
+            setEditVisible(false);
+            setTimeout(() => {
+              if (e.detail.type === "add") {
+                setIsAdding(true);
+                setEditVisible(true);
+                setFormData({ 
+                  name: "", 
+                  content: "", 
+                  type: e.detail.defaultType || "css", 
+                  enabled: true 
+                });
+              } else if (e.detail.type === "edit") {
+                setEditingSnippet(e.detail.snippet);
+                setEditVisible(true);
+                setFormData({
+                  name: e.detail.snippet.name,
+                  content: e.detail.snippet.content,
+                  type: e.detail.snippet.type,
+                  enabled: e.detail.snippet.enabled,
+                });
+              }
+            }, 100);
+          } else {
+            if (e.detail.type === "add") {
+              setIsAdding(true);
+              setEditVisible(true);
+              setFormData({ 
+                name: "", 
+                content: "", 
+                type: e.detail.defaultType || "css", 
+                enabled: true 
+              });
+            } else if (e.detail.type === "edit") {
+              setEditingSnippet(e.detail.snippet);
+              setEditVisible(true);
+              setFormData({
+                name: e.detail.snippet.name,
+                content: e.detail.snippet.content,
+                type: e.detail.snippet.type,
+                enabled: e.detail.snippet.enabled,
+              });
+            }
           }
         };
 
         const handleCloseEdit = () => {
+          console.log(`[${this.pluginName}] EditDialog received close-edit event`);
           setIsAdding(false);
           setEditingSnippet(null);
           setEditVisible(false);
@@ -1062,6 +1141,7 @@ export class SnippetManager {
         window.addEventListener(`${this.pluginName}-close-edit` as any, handleCloseEdit);
 
         return () => {
+          eventHandledRef.current = false;
           window.removeEventListener(`${this.pluginName}-open-edit` as any, handleOpenEdit);
           window.removeEventListener(`${this.pluginName}-close-edit` as any, handleCloseEdit);
         };
@@ -1130,18 +1210,18 @@ export class SnippetManager {
               maxHeight: "700px",
               backgroundColor: "var(--orca-bg-primary, #fff)",
               borderRadius: "8px",
-              padding: "20px",
+              padding: "12px",
               display: "flex",
               flexDirection: "column",
-              gap: "16px",
+              gap: "10px",
               boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
               position: "relative",
               overflow: "hidden",
               boxSizing: "border-box",
             },
           },
-          // 标题栏
-          React.createElement(
+          // 标题栏（只在添加时显示，编辑时不显示标题）
+          isAdding ? React.createElement(
             "div",
             {
               style: {
@@ -1154,8 +1234,24 @@ export class SnippetManager {
             React.createElement(
               "h3",
               { style: { margin: 0, fontSize: "18px", fontWeight: 600 } },
-              isAdding ? "Add Snippet" : "Edit Snippet"
+              "Add Snippet"
             ),
+            React.createElement(Button, {
+              variant: "plain",
+              onClick: closeEditDialog,
+              style: { padding: "4px" },
+            }, React.createElement("i", { className: "ti ti-x" }))
+          ) : React.createElement(
+            "div",
+            {
+              style: {
+                display: "flex",
+                justifyContent: "flex-end",
+                alignItems: "center",
+                marginBottom: "0px",
+                marginTop: "-4px",
+              },
+            },
             React.createElement(Button, {
               variant: "plain",
               onClick: closeEditDialog,
@@ -1167,10 +1263,10 @@ export class SnippetManager {
             "label",
             {
               style: {
-                fontSize: "14px",
+                fontSize: "13px",
                 fontWeight: 500,
                 color: "var(--orca-text-primary, #000)",
-                marginBottom: "4px",
+                marginBottom: "2px",
               },
             },
             "Title"
@@ -1181,20 +1277,21 @@ export class SnippetManager {
             onChange: (e: any) =>
               setFormData({ ...formData, name: e.target.value }),
           }),
-          React.createElement(
+          // 类型选择器（只在添加时显示）
+          isAdding ? React.createElement(
             "div",
             {
               style: {
                 display: "flex",
                 flexDirection: "column",
-                gap: "8px",
+                gap: "6px",
               },
             },
             React.createElement(
               "label",
               {
                 style: {
-                  fontSize: "14px",
+                  fontSize: "13px",
                   fontWeight: 500,
                   color: "var(--orca-text-primary, #000)",
                 },
@@ -1239,7 +1336,7 @@ export class SnippetManager {
                   type: value as "css" | "js",
                 }),
             })
-          ),
+          ) : null,
           // 代码编辑器区域
           React.createElement(
             "div",
@@ -1247,9 +1344,9 @@ export class SnippetManager {
               style: {
                 display: "flex",
                 flexDirection: "column",
-                gap: "8px",
+                gap: "6px",
                 flex: 1,
-                minHeight: "300px",
+                minHeight: "250px",
                 overflow: "hidden",
               },
             },
@@ -1257,7 +1354,7 @@ export class SnippetManager {
               "label",
               {
                 style: {
-                  fontSize: "14px",
+                  fontSize: "13px",
                   fontWeight: 500,
                   color: "var(--orca-text-primary, #000)",
                 },
@@ -1272,9 +1369,9 @@ export class SnippetManager {
               style: {
                 width: "100%",
                 flex: 1,
-                padding: "12px",
+                padding: "10px",
                 fontFamily: "monospace",
-                fontSize: "14px",
+                fontSize: "13px",
                 border: "1px solid var(--orca-border-color, #e0e0e0)",
                 borderRadius: "4px",
                 resize: "none",
@@ -1282,7 +1379,7 @@ export class SnippetManager {
                 color: "var(--orca-text-primary, #000)",
                 boxSizing: "border-box",
                 overflow: "auto",
-                minHeight: "200px",
+                minHeight: "180px",
               },
             })
           ),
@@ -1293,6 +1390,7 @@ export class SnippetManager {
                 display: "flex",
                 alignItems: "center",
                 gap: "8px",
+                marginTop: "-4px",
               },
             },
             React.createElement(Switch, {
@@ -1310,7 +1408,7 @@ export class SnippetManager {
                 gap: "8px",
                 justifyContent: "flex-end",
                 marginTop: "auto",
-                paddingTop: "8px",
+                paddingTop: "0px",
                 flexShrink: 0,
               },
             },
