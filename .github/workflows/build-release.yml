@@ -2,126 +2,111 @@ name: Build and Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: read
-
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmmirror.com'
-          cache: 'npm'
-
-      - name: Configure npm registry
-        run: |
-          npm config set registry https://registry.npmmirror.com
-          npm config set fetch-retries 5
-          npm config set fetch-retry-mintimeout 20000
-          npm config set fetch-retry-maxtimeout 120000
-
-      - name: Install dependencies
-        run: |
-          npm ci --prefer-offline --no-audit || npm ci --no-audit
-
-      - name: Build project
-        run: npm run build
-
-      - name: Prepare package files
-        run: |
-          # 创建临时打包目录
-          mkdir -p package-release
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        registry-url: 'https://registry.npmmirror.com'
+        cache: 'npm'
+        
+    - name: Configure npm registry
+      run: |
+        npm config set registry https://registry.npmmirror.com
+        npm config set fetch-retries 5
+        npm config set fetch-retry-mintimeout 20000
+        npm config set fetch-retry-maxtimeout 120000
+        
+    - name: Install dependencies
+      run: npm ci --prefer-offline --no-audit || npm ci --no-audit
+      
+    - name: Build plugin
+      run: npm run build
+      
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: plugin-dist
+        path: dist/
+        retention-days: 30
+        
+    - name: Create plugin package structure
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        # 创建插件文件夹
+        mkdir -p package-release
+        
+        # 复制必要文件（排除 ref/ 和 node_modules/）
+        cp -r dist package-release/
+        cp icon.svg package-release/ 2>/dev/null || cp icon.png package-release/ 2>/dev/null || true
+        cp package.json package-release/
+        cp plugin.json package-release/
+        
+        # 如果有 README.md，也复制
+        cp README.md package-release/ 2>/dev/null || true
+        
+        # 显示插件文件夹结构
+        echo "Plugin folder structure:"
+        find package-release -type f | sort
+        
+    - name: Create plugin ZIP package
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        # 创建ZIP压缩包（排除 ref/ 和 node_modules/）
+        cd package-release
+        zip -r ../orca-snippets-plugin.zip . -x "*.git*" "*node_modules*" "*ref/*"
+        cd ..
+        
+        # 显示ZIP内容
+        echo "ZIP package contents:"
+        unzip -l orca-snippets-plugin.zip
+        
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        body: |
+          ## Orca Snippets Plugin ${{ github.ref_name }}
           
-          # 复制必要文件（排除 ref/ 和 node_modules/）
-          cp -r dist package-release/
-          cp icon.svg package-release/ 2>/dev/null || cp icon.png package-release/ 2>/dev/null || true
-          cp package.json package-release/
-          cp plugin.json package-release/
+          ### 安装
+          下载 `orca-snippets-plugin.zip` 并解压到 `orca/plugins/orca-snippets-plugin/` 目录
           
-          # 如果有 README.md，也复制
-          cp README.md package-release/ 2>/dev/null || true
-
-      - name: Create release package
-        run: |
-          cd package-release
-          zip -r ../orca-snippets-plugin.zip . -x "*.git*" "*node_modules*" "*ref/*"
-          cd ..
-
-      - name: Get tag name
-        id: tag
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            # 手动触发时使用 package.json 中的版本号
-            VERSION=$(node -p "require('./package.json').version")
-            echo "tag=v$VERSION" >> $GITHUB_OUTPUT
-          else
-            # 标签推送时使用标签名
-            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Verify tag exists
-        run: |
-          git fetch --tags
-          git tag | grep "^${{ steps.tag.outputs.tag }}$" || (echo "Tag ${{ steps.tag.outputs.tag }} not found" && exit 1)
-
-      - name: Create Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # 检查 Release 是否已存在
-          if gh release view "${{ steps.tag.outputs.tag }}" 2>/dev/null; then
-            echo "Release ${{ steps.tag.outputs.tag }} already exists, skipping creation"
-          else
-            # 创建 Release
-            gh release create "${{ steps.tag.outputs.tag }}" \
-              --title "Release ${{ steps.tag.outputs.tag }}" \
-              --notes "## Orca Snippets Plugin ${{ steps.tag.outputs.tag }}
-            
-            ### 安装
-            下载 \`orca-snippets-plugin.zip\` 并解压到 \`orca/plugins/orca-snippets-plugin/\` 目录
-            
-            ### 文件结构
-            - \`dist/index.js\` - 编译后的插件代码
-            - \`icon.svg\` - 插件图标
-            - \`package.json\` - 项目配置
-            - \`plugin.json\` - 插件配置" \
-              --repo "${{ github.repository }}"
-          fi
-
-      - name: Upload Release Asset
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ steps.tag.outputs.tag }}" \
-            orca-snippets-plugin.zip \
-            --repo "${{ github.repository }}" \
-            --clobber || echo "Upload failed or file already exists"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: orca-snippets-plugin-${{ steps.tag.outputs.tag }}
-          path: |
-            package-release/
-            orca-snippets-plugin.zip
-          retention-days: 30
-
-      - name: Display package structure
-        run: |
-          echo "Package structure:"
-          ls -la package-release/
-
+          ### 文件结构
+          - `dist/index.js` - 编译后的插件代码
+          - `icon.svg` - 插件图标
+          - `package.json` - 项目配置
+          - `plugin.json` - 插件配置
+        draft: false
+        prerelease: false
+        
+    - name: Upload plugin ZIP package
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./orca-snippets-plugin.zip
+        asset_name: orca-snippets-plugin.zip
+        asset_content_type: application/zip
