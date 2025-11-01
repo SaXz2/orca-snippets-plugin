@@ -191,12 +191,12 @@ export class SnippetManager {
           // 需要等待 DOM 就绪
           if (document.readyState === "loading") {
             document.addEventListener("DOMContentLoaded", executeCode);
-          } else if (document.readyState === "interactive") {
-            // DOM 已解析但可能还未完全渲染，延迟执行
-            setTimeout(executeCode, 100);
-          } else {
-            // DOM 已完全加载
+          } else if (document.readyState === "complete") {
+            // DOM 已完全加载，立即执行
             executeCode();
+          } else {
+            // DOM 已解析但可能还未完全渲染，使用 requestAnimationFrame 确保在下一帧执行（比 setTimeout 更快）
+            requestAnimationFrame(executeCode);
           }
         } else {
           // 不需要等待 DOM，立即执行
