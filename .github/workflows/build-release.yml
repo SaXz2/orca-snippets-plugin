@@ -79,27 +79,37 @@ jobs:
           git tag | grep "^${{ steps.tag.outputs.tag }}$" || (echo "Tag ${{ steps.tag.outputs.tag }} not found" && exit 1)
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ steps.tag.outputs.tag }}
-          name: Release ${{ steps.tag.outputs.tag }}
-          body: |
-            ## Orca Snippets Plugin ${{ steps.tag.outputs.tag }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 检查 Release 是否已存在
+          if gh release view "${{ steps.tag.outputs.tag }}" 2>/dev/null; then
+            echo "Release ${{ steps.tag.outputs.tag }} already exists, skipping creation"
+          else
+            # 创建 Release
+            gh release create "${{ steps.tag.outputs.tag }}" \
+              --title "Release ${{ steps.tag.outputs.tag }}" \
+              --notes "## Orca Snippets Plugin ${{ steps.tag.outputs.tag }}
             
             ### 安装
-            下载 `orca-snippets-plugin.zip` 并解压到 `orca/plugins/orca-snippets-plugin/` 目录
+            下载 \`orca-snippets-plugin.zip\` 并解压到 \`orca/plugins/orca-snippets-plugin/\` 目录
             
             ### 文件结构
-            - `dist/index.js` - 编译后的插件代码
-            - `icon.svg` - 插件图标
-            - `package.json` - 项目配置
-            - `plugin.json` - 插件配置
-          files: |
-            orca-snippets-plugin.zip
-          draft: false
-          prerelease: false
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fail_on_unmatched_files: false
+            - \`dist/index.js\` - 编译后的插件代码
+            - \`icon.svg\` - 插件图标
+            - \`package.json\` - 项目配置
+            - \`plugin.json\` - 插件配置" \
+              --repo "${{ github.repository }}"
+          fi
+
+      - name: Upload Release Asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" \
+            orca-snippets-plugin.zip \
+            --repo "${{ github.repository }}" \
+            --clobber || echo "Upload failed or file already exists"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
