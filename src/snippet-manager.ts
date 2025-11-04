@@ -314,7 +314,13 @@ export class SnippetManager {
    * 获取所有代码片段
    */
   getAllSnippets(): Snippet[] {
-    return Array.from(this.snippets.values());
+    return Array.from(this.snippets.values()).sort((a, b) => {
+      // 按创建时间排序，如果创建时间相同则按更新时间排序
+      if (a.createdAt !== b.createdAt) {
+        return a.createdAt - b.createdAt;
+      }
+      return a.updatedAt - b.updatedAt;
+    });
   }
 
   /**
@@ -322,6 +328,106 @@ export class SnippetManager {
    */
   getSnippet(snippetId: string): Snippet | undefined {
     return this.snippets.get(snippetId);
+  }
+
+  /**
+   * 导出所有代码片段为 JSON 文件
+   */
+  exportSnippets() {
+    const snippetsArray = this.getAllSnippets();
+    const dataStr = JSON.stringify(snippetsArray, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `snippets-${new Date().toISOString().split("T")[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * 从 JSON 文件导入代码片段
+   */
+  async importSnippets(file: File): Promise<{ success: number; failed: number; errors: string[] }> {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const result = e.target?.result as string;
+        let importedSnippets: Snippet[] = [];
+        const errors: string[] = [];
+        let success = 0;
+        let failed = 0;
+
+        try {
+          importedSnippets = JSON.parse(result);
+          if (!Array.isArray(importedSnippets)) {
+            throw new Error("Invalid file format: expected an array of snippets");
+          }
+
+          for (const snippet of importedSnippets) {
+            try {
+              // 验证代码片段结构
+              if (!snippet.name || !snippet.content || !snippet.type) {
+                throw new Error(`Invalid snippet: missing required fields`);
+              }
+
+              if (snippet.type !== "css" && snippet.type !== "js") {
+                throw new Error(`Invalid snippet type: ${snippet.type}`);
+              }
+
+              // 生成新的 ID（避免 ID 冲突）
+              const now = Date.now();
+              // 如果导入的文件中有 createdAt，保留它（这样可以保持原有的顺序）
+              // 如果没有，使用递增的时间戳来保持导入顺序
+              const baseTime = now + success * 1000; // 每个代码片段间隔1秒，确保顺序
+              const newSnippet: Snippet = {
+                id: `snippet-${now}-${Math.random().toString(36).substr(2, 9)}`,
+                name: snippet.name,
+                content: snippet.content,
+                type: snippet.type,
+                enabled: snippet.enabled ?? false,
+                createdAt: snippet.createdAt ?? baseTime,
+                updatedAt: snippet.updatedAt ?? baseTime,
+              };
+
+              this.snippets.set(newSnippet.id, newSnippet);
+              success++;
+
+              // 如果启用了，立即注入
+              if (newSnippet.enabled) {
+                this.injectSnippet(newSnippet);
+              }
+            } catch (error: any) {
+              failed++;
+              errors.push(`Snippet "${snippet.name || "unknown"}": ${error.message}`);
+            }
+          }
+
+          // 保存所有导入的代码片段
+          if (success > 0) {
+            await this.saveSnippets();
+          }
+
+          resolve({ success, failed, errors });
+        } catch (error: any) {
+          resolve({
+            success: 0,
+            failed: importedSnippets.length || 1,
+            errors: [error.message || "Failed to parse JSON file"],
+          });
+        }
+      };
+      reader.onerror = () => {
+        resolve({
+          success: 0,
+          failed: 0,
+          errors: ["Failed to read file"],
+        });
+      };
+      reader.readAsText(file);
+    });
   }
 
   // 管理弹出菜单的状态
@@ -344,7 +450,6 @@ export class SnippetManager {
     const Switch = orca.components.Switch;
     const Popup = orca.components.Popup;
     const ModalOverlay = orca.components.ModalOverlay;
-    const ConfirmBox = orca.components.ConfirmBox;
     const Menu = orca.components.Menu;
     const MenuText = orca.components.MenuText;
 
@@ -403,6 +508,9 @@ export class SnippetManager {
       const [snippetType, setSnippetType] = React.useState<"css" | "js">("css");
       const [searchQuery, setSearchQuery] = React.useState("");
       const [showSearch, setShowSearch] = React.useState(false);
+      const importInputRef = React.useRef<HTMLInputElement>(null);
+      const [showMoreMenu, setShowMoreMenu] = React.useState(false);
+      const moreMenuButtonRef = React.useRef<HTMLElement>(null);
 
       // 监听刷新事件
       React.useEffect(() => {
@@ -428,7 +536,7 @@ export class SnippetManager {
         return typeMatch && searchMatch;
       });
 
-      const handleDelete = async (snippetId: string, close: () => void) => {
+      const handleDelete = async (snippetId: string) => {
         try {
           await this.deleteSnippet(snippetId);
           orca.notify("success", "Snippet deleted successfully");
@@ -729,17 +837,97 @@ export class SnippetManager {
               )
             ),
             React.createElement("span", { style: { flex: 1 } }),
-            // 重新加载界面按钮
-            React.createElement(Button, {
-              variant: "plain",
-              onClick: (e: any) => {
-                e?.stopPropagation();
-                e?.preventDefault();
-                location.reload();
+            // 更多操作菜单按钮
+            React.createElement(
+              "div",
+              { ref: moreMenuButtonRef as any },
+              React.createElement(Button, {
+                variant: "plain",
+                onClick: (e: any) => {
+                  e?.stopPropagation();
+                  e?.preventDefault();
+                  setShowMoreMenu(!showMoreMenu);
+                },
+                style: { padding: "4px" },
+                title: "More Options",
+              }, React.createElement("i", { className: "ti ti-dots" })),
+            ),
+            showMoreMenu ? React.createElement(
+              Popup,
+              {
+                refElement: moreMenuButtonRef as any,
+                visible: showMoreMenu,
+                onClose: () => setShowMoreMenu(false),
+                defaultPlacement: "bottom",
+                alignment: "right",
+                escapeToClose: true,
               },
-              style: { padding: "4px" },
-              title: "Reload UI",
-            }, React.createElement("i", { className: "ti ti-refresh" })),
+              React.createElement(
+                Menu,
+                null,
+                React.createElement(MenuText, {
+                  title: "Export Snippets",
+                  preIcon: "ti ti-download",
+                  onClick: () => {
+                    setShowMoreMenu(false);
+                    try {
+                      this.exportSnippets();
+                      orca.notify("success", "Snippets exported successfully");
+                    } catch (error: any) {
+                      orca.notify("error", `Failed to export snippets: ${error.message}`);
+                    }
+                  },
+                }),
+                React.createElement(MenuText, {
+                  title: "Import Snippets",
+                  preIcon: "ti ti-upload",
+                  onClick: () => {
+                    setShowMoreMenu(false);
+                    importInputRef.current?.click();
+                  },
+                }),
+                React.createElement(MenuText, {
+                  title: "Reload UI",
+                  preIcon: "ti ti-refresh",
+                  onClick: () => {
+                    setShowMoreMenu(false);
+                    location.reload();
+                  },
+                }),
+              )
+            ) : null,
+            React.createElement("input", {
+              ref: importInputRef,
+              type: "file",
+              accept: ".json,application/json",
+              style: { display: "none" },
+              onChange: async (e: any) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                
+                try {
+                  const result = await this.importSnippets(file);
+                  if (result.success > 0) {
+                    setSnippets(this.getAllSnippets());
+                    window.dispatchEvent(new CustomEvent(`${this.pluginName}-refresh`));
+                    const message = result.failed > 0
+                      ? `Imported ${result.success} snippet(s), ${result.failed} failed`
+                      : `Successfully imported ${result.success} snippet(s)`;
+                    orca.notify("success", message);
+                    if (result.errors.length > 0) {
+                      console.error("Import errors:", result.errors);
+                    }
+                  } else {
+                    orca.notify("error", `Failed to import: ${result.errors.join(", ")}`);
+                  }
+                } catch (error: any) {
+                  orca.notify("error", `Failed to import snippets: ${error.message}`);
+                }
+                
+                // 重置 input 值，允许重复选择同一个文件
+                e.target.value = "";
+              },
+            }),
             // 搜索按钮
             React.createElement(Button, {
               variant: "plain",
@@ -885,29 +1073,16 @@ export class SnippetManager {
                             style: { padding: "4px", minWidth: "auto" },
                             title: "Edit",
                           }, React.createElement("i", { className: "ti ti-edit", style: { fontSize: "14px" } })),
-                          React.createElement(ConfirmBox, {
-                            text: `Are you sure you want to delete "${snippet.name || 'this snippet'}"?`,
-                            onConfirm: async (e: any, close: () => void) => {
+                          React.createElement(Button, {
+                            variant: "plain",
+                            onClick: async (e: any) => {
                               e?.stopPropagation();
-                              await handleDelete(snippet.id, close);
-                              close();
+                              e?.preventDefault();
+                              await handleDelete(snippet.id);
                             },
-                            children: (open: (e: any) => void) =>
-                              React.createElement(
-                                Button,
-                                {
-                                  variant: "plain",
-                                  onClick: (e: any) => {
-                                    e?.stopPropagation();
-                                    e?.preventDefault();
-                                    open(e);
-                                  },
-                                  style: { padding: "4px", minWidth: "auto" },
-                                  title: "Delete",
-                                },
-                                React.createElement("i", { className: "ti ti-trash", style: { fontSize: "14px" } })
-                              ),
-                          })
+                            style: { padding: "4px", minWidth: "auto" },
+                            title: "Delete",
+                          }, React.createElement("i", { className: "ti ti-trash", style: { fontSize: "14px" } }))
                         ) : null,
                         React.createElement("span", { style: { width: "8px" } }),
                         // 启用开关
