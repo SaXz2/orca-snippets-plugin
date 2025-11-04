@@ -57,7 +57,7 @@ export async function load(_name: string) {
         },
         title: t("openSnippetsManager", {}, orca.state.locale === "zh-CN" ? "zh-CN" : "en"),
       },
-      React.createElement("i", { className: "ti ti-code" })
+      React.createElement("i", { className: "ti ti-code", style: { fontSize: "var(--orca-fontsize-lg)" } })
     );
   });
 }

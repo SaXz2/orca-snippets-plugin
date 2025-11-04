@@ -848,9 +848,10 @@ export class SnippetManager {
                   e?.preventDefault();
                   setShowMoreMenu(!showMoreMenu);
                 },
-                style: { padding: "4px" },
+                className: "block__icon block__icon--show fn__flex-center ariaLabel",
+                style: { margin: "0 1px" },
                 title: "More Options",
-              }, React.createElement("i", { className: "ti ti-dots" })),
+              }, React.createElement("i", { className: "ti ti-dots", style: { pointerEvents: "none" } })),
             ),
             showMoreMenu ? React.createElement(
               Popup,
@@ -932,9 +933,10 @@ export class SnippetManager {
             React.createElement(Button, {
               variant: "plain",
               onClick: () => setShowSearch(!showSearch),
-              style: { padding: "4px" },
+              className: "block__icon block__icon--show fn__flex-center ariaLabel",
+              style: { margin: "0 1px" },
               title: "Search",
-            }, React.createElement("i", { className: "ti ti-search" })),
+            }, React.createElement("i", { className: "ti ti-search", style: { pointerEvents: "none" } })),
             // 添加按钮
             React.createElement(Button, {
               variant: "plain",
@@ -946,9 +948,10 @@ export class SnippetManager {
                   openAddDialog(() => {});
                 }, 100);
               },
-              style: { padding: "4px" },
+              className: "block__icon block__icon--show fn__flex-center ariaLabel",
+              style: { margin: "0 1px" },
               title: "Add Snippet",
-            }, React.createElement("i", { className: "ti ti-plus" })),
+            }, React.createElement("i", { className: "ti ti-plus", style: { pointerEvents: "none" } })),
             // 关闭按钮
             React.createElement(Button, {
               variant: "plain",
@@ -957,8 +960,9 @@ export class SnippetManager {
                 e?.preventDefault();
                 handleClose();
               },
-              style: { padding: "4px" },
-            }, React.createElement("i", { className: "ti ti-x" }))
+              className: "block__icon block__icon--show fn__flex-center ariaLabel",
+              style: { margin: "0 1px" },
+            }, React.createElement("i", { className: "ti ti-x", style: { pointerEvents: "none" } }))
           ),
           // 搜索输入框
           showSearch ? React.createElement(
