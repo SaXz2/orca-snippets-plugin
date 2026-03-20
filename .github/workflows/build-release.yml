@@ -57,6 +57,7 @@ jobs:
         cp icon.svg package-release/ 2>/dev/null || cp icon.png package-release/ 2>/dev/null || true
         cp package.json package-release/
         cp plugin.json package-release/
+        cp LICENSE package-release/
         
         # 如果有 README.md，也复制
         cp README.md package-release/ 2>/dev/null || true
