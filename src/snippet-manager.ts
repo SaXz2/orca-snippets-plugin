@@ -309,13 +309,13 @@ export class SnippetManager {
           ? (...handlerArgs: any[]) => {
               if (context) {
                 context.timeouts = context.timeouts.filter((id) => id !== timerId);
-                return manager.runWithJsContext(context, () => handler(...handlerArgs));
+                return manager.runWithJsContext(context, () => handler.apply(window, handlerArgs));
               }
-              return handler(...handlerArgs);
+              return handler.apply(window, handlerArgs);
             }
           : handler;
 
-      timerId = original.setTimeout(wrappedHandler as TimerHandler, timeout, ...args);
+      timerId = original.setTimeout.call(window, wrappedHandler as TimerHandler, timeout, ...args);
       if (context) {
         context.timeouts.push(timerId);
       }
@@ -328,16 +328,16 @@ export class SnippetManager {
           context.timeouts = context.timeouts.filter((timerId) => timerId !== id);
         }
       }
-      return original.clearTimeout(id);
+      return original.clearTimeout.call(window, id);
     }) as typeof window.clearTimeout;
 
     window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
       const context = manager.activeJsContext;
       const wrappedHandler =
         typeof handler === "function" && context
-          ? (...handlerArgs: any[]) => manager.runWithJsContext(context, () => handler(...handlerArgs))
+          ? (...handlerArgs: any[]) => manager.runWithJsContext(context, () => handler.apply(window, handlerArgs))
           : handler;
-      const intervalId = original.setInterval(wrappedHandler as TimerHandler, timeout, ...args);
+      const intervalId = original.setInterval.call(window, wrappedHandler as TimerHandler, timeout, ...args);
       if (context) {
         context.intervals.push(intervalId);
       }
@@ -350,7 +350,7 @@ export class SnippetManager {
           context.intervals = context.intervals.filter((intervalId) => intervalId !== id);
         }
       }
-      return original.clearInterval(id);
+      return original.clearInterval.call(window, id);
     }) as typeof window.clearInterval;
 
     window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
@@ -364,7 +364,7 @@ export class SnippetManager {
         return callback(time);
       };
 
-      frameId = original.requestAnimationFrame(wrappedCallback);
+      frameId = original.requestAnimationFrame.call(window, wrappedCallback);
       if (context) {
         context.animationFrames.push({ id: frameId });
       }
@@ -375,7 +375,7 @@ export class SnippetManager {
       for (const context of manager.jsContexts.values()) {
         context.animationFrames = context.animationFrames.filter((frame) => frame.id !== id);
       }
-      return original.cancelAnimationFrame(id);
+      return original.cancelAnimationFrame.call(window, id);
     }) as typeof window.cancelAnimationFrame;
 
     this.patchObserver("MutationObserver", original.MutationObserver);
