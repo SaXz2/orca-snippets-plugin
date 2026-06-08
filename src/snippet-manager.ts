@@ -22,6 +22,56 @@ export interface Snippet {
   updatedAt: number;
 }
 
+interface SnippetSettings {
+  cssEnabled: boolean;
+  jsEnabled: boolean;
+}
+
+interface TrackedEventListener {
+  target: EventTarget;
+  type: string;
+  listener: EventListenerOrEventListenerObject;
+  options?: boolean | AddEventListenerOptions;
+}
+
+interface TrackedAnimationFrame {
+  id: number;
+}
+
+interface TrackedListenerRecord extends TrackedEventListener {
+  originalListener: EventListenerOrEventListenerObject;
+  context: JsSnippetContext;
+}
+
+interface JsSnippetContext {
+  snippetId: string;
+  cleanups: Set<() => void>;
+  eventListeners: TrackedEventListener[];
+  timeouts: number[];
+  intervals: number[];
+  animationFrames: TrackedAnimationFrame[];
+  observers: { disconnect: () => void }[];
+  createdNodes: Node[];
+  disposed: boolean;
+}
+
+type OriginalRuntimeApis = {
+  addEventListener: typeof EventTarget.prototype.addEventListener;
+  removeEventListener: typeof EventTarget.prototype.removeEventListener;
+  setTimeout: typeof window.setTimeout;
+  clearTimeout: typeof window.clearTimeout;
+  setInterval: typeof window.setInterval;
+  clearInterval: typeof window.clearInterval;
+  requestAnimationFrame: typeof window.requestAnimationFrame;
+  cancelAnimationFrame: typeof window.cancelAnimationFrame;
+  MutationObserver?: typeof MutationObserver;
+  ResizeObserver?: typeof ResizeObserver;
+  IntersectionObserver?: typeof IntersectionObserver;
+  createElement: typeof Document.prototype.createElement;
+  createElementNS: typeof Document.prototype.createElementNS;
+  createTextNode: typeof Document.prototype.createTextNode;
+};
+
 /**
  * 代码片段管理器
  * 负责代码片段的存储、加载、注入和管理界面
@@ -30,6 +80,12 @@ export class SnippetManager {
   private pluginName: string;
   private snippets: Map<string, Snippet> = new Map();
   private injectedElements: Map<string, HTMLElement> = new Map();
+  private jsContexts: Map<string, JsSnippetContext> = new Map();
+  private listenerRecords: TrackedListenerRecord[] = [];
+  private settings: SnippetSettings = { cssEnabled: true, jsEnabled: true };
+  private runtimePatched = false;
+  private activeJsContext: JsSnippetContext | null = null;
+  private originalRuntimeApis: OriginalRuntimeApis | null = null;
 
   constructor(pluginName: string) {
     this.pluginName = pluginName;
@@ -49,6 +105,19 @@ export class SnippetManager {
       }
     } catch (error) {
       // Silently fail to load snippets
+    }
+
+    try {
+      const data = await orca.plugins.getData(this.pluginName, "settings");
+      if (data) {
+        const settings = JSON.parse(data) as Partial<SnippetSettings>;
+        this.settings = {
+          cssEnabled: settings.cssEnabled ?? true,
+          jsEnabled: settings.jsEnabled ?? true,
+        };
+      }
+    } catch (error) {
+      this.settings = { cssEnabled: true, jsEnabled: true };
     }
   }
 
@@ -72,12 +141,416 @@ export class SnippetManager {
     );
   }
 
+  private async saveSettings() {
+    await orca.plugins.setData(
+      this.pluginName,
+      "settings",
+      JSON.stringify(this.settings)
+    );
+  }
+
+  getSettings(): SnippetSettings {
+    return { ...this.settings };
+  }
+
+  async setTypeEnabled(type: "css" | "js", enabled: boolean) {
+    if (type === "css") {
+      this.settings.cssEnabled = enabled;
+      if (enabled) {
+        this.loadEnabledByType("css");
+      } else {
+        this.cleanupByType("css");
+      }
+    } else {
+      this.settings.jsEnabled = enabled;
+      if (enabled) {
+        this.loadEnabledByType("js");
+      } else {
+        this.cleanupByType("js");
+      }
+    }
+
+    await this.saveSettings();
+  }
+
+  private isTypeGloballyEnabled(type: "css" | "js") {
+    return type === "css" ? this.settings.cssEnabled : this.settings.jsEnabled;
+  }
+
+  private loadEnabledByType(type: "css" | "js") {
+    for (const snippet of this.snippets.values()) {
+      if (snippet.type === type && snippet.enabled) {
+        this.injectSnippet(snippet);
+      }
+    }
+  }
+
+  private cleanupByType(type: "css" | "js") {
+    for (const snippet of this.snippets.values()) {
+      if (snippet.type === type) {
+        this.removeSnippet(snippet.id);
+      }
+    }
+  }
+
+  private createJsContext(snippetId: string): JsSnippetContext {
+    const context: JsSnippetContext = {
+      snippetId,
+      cleanups: new Set(),
+      eventListeners: [],
+      timeouts: [],
+      intervals: [],
+      animationFrames: [],
+      observers: [],
+      createdNodes: [],
+      disposed: false,
+    };
+
+    this.jsContexts.set(snippetId, context);
+    return context;
+  }
+
+  private runWithJsContext<T>(context: JsSnippetContext, callback: () => T): T {
+    const previousContext = this.activeJsContext;
+    this.activeJsContext = context;
+    try {
+      return callback();
+    } finally {
+      this.activeJsContext = previousContext;
+    }
+  }
+
+  private ensureRuntimeTracking() {
+    if (this.runtimePatched) return;
+
+    const original: OriginalRuntimeApis = {
+      addEventListener: EventTarget.prototype.addEventListener,
+      removeEventListener: EventTarget.prototype.removeEventListener,
+      setTimeout: window.setTimeout,
+      clearTimeout: window.clearTimeout,
+      setInterval: window.setInterval,
+      clearInterval: window.clearInterval,
+      requestAnimationFrame: window.requestAnimationFrame,
+      cancelAnimationFrame: window.cancelAnimationFrame,
+      MutationObserver: window.MutationObserver,
+      ResizeObserver: window.ResizeObserver,
+      IntersectionObserver: window.IntersectionObserver,
+      createElement: Document.prototype.createElement,
+      createElementNS: Document.prototype.createElementNS,
+      createTextNode: Document.prototype.createTextNode,
+    };
+    this.originalRuntimeApis = original;
+
+    const manager = this;
+
+    EventTarget.prototype.addEventListener = function (
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions
+    ) {
+      const context = manager.activeJsContext;
+      if (!context || !listener) {
+        return original.addEventListener.call(this, type, listener, options);
+      }
+
+      const wrappedListener: EventListenerOrEventListenerObject =
+        typeof listener === "function"
+          ? function (this: EventTarget, event: Event) {
+              return manager.runWithJsContext(context, () => listener.call(this, event));
+            }
+          : {
+              handleEvent(event: Event) {
+                return manager.runWithJsContext(context, () => listener.handleEvent(event));
+              },
+            };
+
+      const record: TrackedListenerRecord = {
+        target: this,
+        type,
+        listener: wrappedListener,
+        originalListener: listener,
+        options,
+        context,
+      };
+
+      context.eventListeners.push(record);
+      manager.listenerRecords.push(record);
+      return original.addEventListener.call(this, type, wrappedListener, options);
+    };
+
+    EventTarget.prototype.removeEventListener = function (
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | EventListenerOptions
+    ) {
+      const index = manager.listenerRecords.findIndex((record) =>
+        record.target === this &&
+        record.type === type &&
+        record.originalListener === listener
+      );
+
+      if (index >= 0) {
+        const [record] = manager.listenerRecords.splice(index, 1);
+        const contextIndex = record.context.eventListeners.indexOf(record);
+        if (contextIndex >= 0) {
+          record.context.eventListeners.splice(contextIndex, 1);
+        }
+        return original.removeEventListener.call(this, type, record.listener, options);
+      }
+
+      return original.removeEventListener.call(this, type, listener, options);
+    };
+
+    window.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
+      const context = manager.activeJsContext;
+      let timerId = 0;
+      const wrappedHandler =
+        typeof handler === "function"
+          ? (...handlerArgs: any[]) => {
+              if (context) {
+                context.timeouts = context.timeouts.filter((id) => id !== timerId);
+                return manager.runWithJsContext(context, () => handler(...handlerArgs));
+              }
+              return handler(...handlerArgs);
+            }
+          : handler;
+
+      timerId = original.setTimeout(wrappedHandler as TimerHandler, timeout, ...args);
+      if (context) {
+        context.timeouts.push(timerId);
+      }
+      return timerId;
+    }) as typeof window.setTimeout;
+
+    window.clearTimeout = ((id?: number) => {
+      if (id != null) {
+        for (const context of manager.jsContexts.values()) {
+          context.timeouts = context.timeouts.filter((timerId) => timerId !== id);
+        }
+      }
+      return original.clearTimeout(id);
+    }) as typeof window.clearTimeout;
+
+    window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
+      const context = manager.activeJsContext;
+      const wrappedHandler =
+        typeof handler === "function" && context
+          ? (...handlerArgs: any[]) => manager.runWithJsContext(context, () => handler(...handlerArgs))
+          : handler;
+      const intervalId = original.setInterval(wrappedHandler as TimerHandler, timeout, ...args);
+      if (context) {
+        context.intervals.push(intervalId);
+      }
+      return intervalId;
+    }) as typeof window.setInterval;
+
+    window.clearInterval = ((id?: number) => {
+      if (id != null) {
+        for (const context of manager.jsContexts.values()) {
+          context.intervals = context.intervals.filter((intervalId) => intervalId !== id);
+        }
+      }
+      return original.clearInterval(id);
+    }) as typeof window.clearInterval;
+
+    window.requestAnimationFrame = ((callback: FrameRequestCallback) => {
+      const context = manager.activeJsContext;
+      let frameId = 0;
+      const wrappedCallback: FrameRequestCallback = (time) => {
+        if (context) {
+          context.animationFrames = context.animationFrames.filter((frame) => frame.id !== frameId);
+          return manager.runWithJsContext(context, () => callback(time));
+        }
+        return callback(time);
+      };
+
+      frameId = original.requestAnimationFrame(wrappedCallback);
+      if (context) {
+        context.animationFrames.push({ id: frameId });
+      }
+      return frameId;
+    }) as typeof window.requestAnimationFrame;
+
+    window.cancelAnimationFrame = ((id: number) => {
+      for (const context of manager.jsContexts.values()) {
+        context.animationFrames = context.animationFrames.filter((frame) => frame.id !== id);
+      }
+      return original.cancelAnimationFrame(id);
+    }) as typeof window.cancelAnimationFrame;
+
+    this.patchObserver("MutationObserver", original.MutationObserver);
+    this.patchObserver("ResizeObserver", original.ResizeObserver);
+    this.patchObserver("IntersectionObserver", original.IntersectionObserver);
+
+    Document.prototype.createElement = function (
+      this: Document,
+      ...args: Parameters<typeof Document.prototype.createElement>
+    ) {
+      const element = original.createElement.apply(this, args);
+      const context = manager.activeJsContext;
+      if (context) {
+        context.createdNodes.push(element);
+      }
+      return element;
+    } as typeof Document.prototype.createElement;
+
+    Document.prototype.createElementNS = function (
+      this: Document,
+      ...args: Parameters<typeof Document.prototype.createElementNS>
+    ) {
+      const element = original.createElementNS.apply(this, args as any);
+      const context = manager.activeJsContext;
+      if (context) {
+        context.createdNodes.push(element);
+      }
+      return element;
+    } as typeof Document.prototype.createElementNS;
+
+    Document.prototype.createTextNode = function (
+      this: Document,
+      ...args: Parameters<typeof Document.prototype.createTextNode>
+    ) {
+      const node = original.createTextNode.apply(this, args);
+      const context = manager.activeJsContext;
+      if (context) {
+        context.createdNodes.push(node);
+      }
+      return node;
+    } as typeof Document.prototype.createTextNode;
+
+    this.runtimePatched = true;
+  }
+
+  private patchObserver(
+    name: "MutationObserver" | "ResizeObserver" | "IntersectionObserver",
+    OriginalObserver: any
+  ) {
+    if (!OriginalObserver) return;
+
+    const manager = this;
+    (window as any)[name] = class extends OriginalObserver {
+      constructor(callback: (...args: any[]) => void) {
+        const context = manager.activeJsContext;
+        super(
+          context
+            ? (...args: any[]) => manager.runWithJsContext(context, () => callback(...args))
+            : callback
+        );
+
+        if (context) {
+          context.observers.push(this as unknown as { disconnect: () => void });
+        }
+      }
+    };
+  }
+
+  private restoreRuntimeTrackingIfIdle() {
+    if (!this.runtimePatched || this.jsContexts.size > 0 || !this.originalRuntimeApis) return;
+
+    EventTarget.prototype.addEventListener = this.originalRuntimeApis.addEventListener;
+    EventTarget.prototype.removeEventListener = this.originalRuntimeApis.removeEventListener;
+    window.setTimeout = this.originalRuntimeApis.setTimeout;
+    window.clearTimeout = this.originalRuntimeApis.clearTimeout;
+    window.setInterval = this.originalRuntimeApis.setInterval;
+    window.clearInterval = this.originalRuntimeApis.clearInterval;
+    window.requestAnimationFrame = this.originalRuntimeApis.requestAnimationFrame;
+    window.cancelAnimationFrame = this.originalRuntimeApis.cancelAnimationFrame;
+    Document.prototype.createElement = this.originalRuntimeApis.createElement;
+    Document.prototype.createElementNS = this.originalRuntimeApis.createElementNS;
+    Document.prototype.createTextNode = this.originalRuntimeApis.createTextNode;
+    if (this.originalRuntimeApis.MutationObserver) {
+      window.MutationObserver = this.originalRuntimeApis.MutationObserver;
+    }
+    if (this.originalRuntimeApis.ResizeObserver) {
+      window.ResizeObserver = this.originalRuntimeApis.ResizeObserver;
+    }
+    if (this.originalRuntimeApis.IntersectionObserver) {
+      window.IntersectionObserver = this.originalRuntimeApis.IntersectionObserver;
+    }
+
+    this.originalRuntimeApis = null;
+    this.runtimePatched = false;
+  }
+
+  private cleanupJsContext(snippetId: string) {
+    const context = this.jsContexts.get(snippetId);
+    if (!context) return;
+
+    context.disposed = true;
+    const original = this.originalRuntimeApis;
+
+    for (const cleanup of Array.from(context.cleanups)) {
+      try {
+        cleanup();
+      } catch (error: any) {
+        orca.notify("error", `清理 JS 片段时出错：${error?.message || String(error)}`, {
+          title: "代码片段清理失败",
+        });
+      }
+    }
+    context.cleanups.clear();
+
+    for (const record of [...context.eventListeners]) {
+      try {
+        (original?.removeEventListener ?? EventTarget.prototype.removeEventListener).call(
+          record.target,
+          record.type,
+          record.listener,
+          record.options
+        );
+      } catch (error) {
+        // Ignore cleanup failures from detached targets.
+      }
+    }
+
+    this.listenerRecords = this.listenerRecords.filter((record) => record.context !== context);
+    context.eventListeners = [];
+
+    for (const timeoutId of context.timeouts) {
+      (original?.clearTimeout ?? window.clearTimeout).call(window, timeoutId);
+    }
+    context.timeouts = [];
+
+    for (const intervalId of context.intervals) {
+      (original?.clearInterval ?? window.clearInterval).call(window, intervalId);
+    }
+    context.intervals = [];
+
+    for (const frame of context.animationFrames) {
+      (original?.cancelAnimationFrame ?? window.cancelAnimationFrame).call(window, frame.id);
+    }
+    context.animationFrames = [];
+
+    for (const observer of context.observers) {
+      try {
+        observer.disconnect();
+      } catch (error) {
+        // Ignore cleanup failures from observers that are already disconnected.
+      }
+    }
+    context.observers = [];
+
+    for (const node of context.createdNodes) {
+      try {
+        if (node.isConnected && node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      } catch (error) {
+        // Ignore nodes that were already moved or removed.
+      }
+    }
+    context.createdNodes = [];
+
+    this.jsContexts.delete(snippetId);
+    this.restoreRuntimeTrackingIfIdle();
+  }
+
   /**
    * 加载所有启用的代码片段
    */
   async loadAllEnabled() {
     for (const snippet of this.snippets.values()) {
-      if (snippet.enabled) {
+      if (snippet.enabled && this.isTypeGloballyEnabled(snippet.type)) {
         this.injectSnippet(snippet);
       }
     }
@@ -87,8 +560,11 @@ export class SnippetManager {
    * 清理所有注入的代码片段
    */
   cleanup() {
-    for (const element of this.injectedElements.values()) {
-      element.remove();
+    for (const snippetId of Array.from(this.injectedElements.keys())) {
+      this.removeSnippet(snippetId);
+    }
+    for (const snippetId of Array.from(this.jsContexts.keys())) {
+      this.cleanupJsContext(snippetId);
     }
     this.injectedElements.clear();
   }
@@ -124,7 +600,7 @@ export class SnippetManager {
     if (!code || !code.trim()) {
       return {
         valid: false,
-        error: "Code is empty",
+        error: "代码为空",
       };
     }
 
@@ -139,7 +615,7 @@ export class SnippetManager {
       // 但记录警告信息
       return {
         valid: false,
-        error: error.message || "Potential syntax issue",
+        error: error.message || "可能存在语法问题",
       };
     }
   }
@@ -150,6 +626,10 @@ export class SnippetManager {
   private injectSnippet(snippet: Snippet) {
     // 移除旧的元素（如果存在）
     this.removeSnippet(snippet.id);
+
+    if (!this.isTypeGloballyEnabled(snippet.type)) {
+      return;
+    }
 
     const elementId = `${this.pluginName}-snippet-${snippet.id}`;
 
@@ -171,18 +651,36 @@ export class SnippetManager {
       try {
         // 检查代码是否需要等待 DOM 就绪
         const needsDOMReady = this.checkIfNeedsDOMReady(snippet.content);
+        const context = this.createJsContext(snippet.id);
         
         // 使用 Function 构造函数执行代码（利用 unsafe-eval 权限）
         const executeCode = () => {
           try {
+            if (context.disposed) return;
+            this.ensureRuntimeTracking();
+            const cleanupApi = {
+              onCleanup: (cleanup: () => void) => {
+                if (typeof cleanup === "function") {
+                  context.cleanups.add(cleanup);
+                }
+              },
+              cleanup: (cleanup: () => void) => {
+                if (typeof cleanup === "function") {
+                  context.cleanups.add(cleanup);
+                }
+              },
+            };
             // 创建一个函数来执行代码片段
-            const func = new Function(snippet.content);
-            func();
+            const func = new Function("ctx", snippet.content);
+            const maybeCleanup = this.runWithJsContext(context, () => func(cleanupApi));
+            if (typeof maybeCleanup === "function") {
+              context.cleanups.add(maybeCleanup);
+            }
           } catch (error: any) {
             orca.notify(
               "error",
-              `JavaScript error in "${snippet.name}": ${error.message}`,
-              { title: "Code Snippet Error" }
+              `「${snippet.name}」运行出错：${error.message}`,
+              { title: "代码片段错误" }
             );
           }
         };
@@ -191,12 +689,14 @@ export class SnippetManager {
           // 需要等待 DOM 就绪
           if (document.readyState === "loading") {
             document.addEventListener("DOMContentLoaded", executeCode);
+            context.cleanups.add(() => document.removeEventListener("DOMContentLoaded", executeCode));
           } else if (document.readyState === "complete") {
             // DOM 已完全加载，立即执行
             executeCode();
           } else {
             // DOM 已解析但可能还未完全渲染，使用 requestAnimationFrame 确保在下一帧执行（比 setTimeout 更快）
-            requestAnimationFrame(executeCode);
+            const frameId = requestAnimationFrame(executeCode);
+            context.animationFrames.push({ id: frameId });
           }
         } else {
           // 不需要等待 DOM，立即执行
@@ -215,8 +715,8 @@ export class SnippetManager {
       } catch (error: any) {
         orca.notify(
           "error",
-          `Failed to inject JavaScript "${snippet.name}": ${error.message}`,
-          { title: "Code Snippet Error" }
+          `注入 JS 片段「${snippet.name}」失败：${error.message}`,
+          { title: "代码片段错误" }
         );
       }
     }
@@ -226,6 +726,7 @@ export class SnippetManager {
    * 移除代码片段
    */
   private removeSnippet(snippetId: string) {
+    this.cleanupJsContext(snippetId);
     const element = this.injectedElements.get(snippetId);
     if (element) {
       element.remove();
@@ -264,7 +765,7 @@ export class SnippetManager {
   ) {
     const snippet = this.snippets.get(snippetId);
     if (!snippet) {
-      throw new Error(`Snippet ${snippetId} not found`);
+      throw new Error(`未找到代码片段 ${snippetId}`);
     }
 
     const updatedSnippet: Snippet = {
@@ -302,7 +803,7 @@ export class SnippetManager {
   async toggleSnippet(snippetId: string) {
     const snippet = this.snippets.get(snippetId);
     if (!snippet) {
-      throw new Error(`Snippet ${snippetId} not found`);
+      throw new Error(`未找到代码片段 ${snippetId}`);
     }
 
     return await this.updateSnippet(snippetId, {
@@ -347,6 +848,30 @@ export class SnippetManager {
     URL.revokeObjectURL(url);
   }
 
+  exportSnippet(snippetId: string) {
+    const snippet = this.snippets.get(snippetId);
+    if (!snippet) {
+      throw new Error("未找到这个代码片段");
+    }
+
+    const dataStr = JSON.stringify(snippet, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const safeName = (snippet.name || snippet.type)
+      .trim()
+      .replace(/[\\/:*?"<>|]+/g, "-")
+      .replace(/\s+/g, "-")
+      .slice(0, 80) || snippet.type;
+
+    link.href = url;
+    link.download = `snippet-${safeName}-${new Date().toISOString().split("T")[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
   /**
    * 从 JSON 文件导入代码片段
    */
@@ -361,20 +886,18 @@ export class SnippetManager {
         let failed = 0;
 
         try {
-          importedSnippets = JSON.parse(result);
-          if (!Array.isArray(importedSnippets)) {
-            throw new Error("Invalid file format: expected an array of snippets");
-          }
+          const parsed = JSON.parse(result);
+          importedSnippets = Array.isArray(parsed) ? parsed : [parsed];
 
           for (const snippet of importedSnippets) {
             try {
               // 验证代码片段结构
               if (!snippet.name || !snippet.content || !snippet.type) {
-                throw new Error(`Invalid snippet: missing required fields`);
+                throw new Error("缺少名称、内容或类型");
               }
 
               if (snippet.type !== "css" && snippet.type !== "js") {
-                throw new Error(`Invalid snippet type: ${snippet.type}`);
+                throw new Error(`不支持的片段类型：${snippet.type}`);
               }
 
               // 生成新的 ID（避免 ID 冲突）
@@ -401,7 +924,7 @@ export class SnippetManager {
               }
             } catch (error: any) {
               failed++;
-              errors.push(`Snippet "${snippet.name || "unknown"}": ${error.message}`);
+              errors.push(`片段「${snippet.name || "未命名"}」：${error.message}`);
             }
           }
 
@@ -415,7 +938,7 @@ export class SnippetManager {
           resolve({
             success: 0,
             failed: importedSnippets.length || 1,
-            errors: [error.message || "Failed to parse JSON file"],
+            errors: [error.message || "无法解析 JSON 文件"],
           });
         }
       };
@@ -423,7 +946,7 @@ export class SnippetManager {
         resolve({
           success: 0,
           failed: 0,
-          errors: ["Failed to read file"],
+          errors: ["读取文件失败"],
         });
       };
       reader.readAsText(file);
@@ -511,6 +1034,9 @@ export class SnippetManager {
       const importInputRef = React.useRef<HTMLInputElement>(null);
       const [showMoreMenu, setShowMoreMenu] = React.useState(false);
       const moreMenuButtonRef = React.useRef<HTMLElement>(null);
+      const [settings, setSettings] = React.useState<SnippetSettings>(
+        this.getSettings()
+      );
 
       // 监听刷新事件
       React.useEffect(() => {
@@ -526,6 +1052,7 @@ export class SnippetManager {
       // 计算计数
       const cssCount = snippets.filter((s: Snippet) => s.type === "css").length;
       const jsCount = snippets.filter((s: Snippet) => s.type === "js").length;
+      const currentTypeEnabled = snippetType === "css" ? settings.cssEnabled : settings.jsEnabled;
       
       // 筛选代码片段
       const filteredSnippets = snippets.filter((snippet: Snippet) => {
@@ -539,10 +1066,10 @@ export class SnippetManager {
       const handleDelete = async (snippetId: string) => {
         try {
           await this.deleteSnippet(snippetId);
-          orca.notify("success", "Snippet deleted successfully");
+          orca.notify("success", "代码片段已删除");
           setSnippets(this.getAllSnippets());
         } catch (error: any) {
-          orca.notify("error", `Failed to delete snippet: ${error.message}`);
+          orca.notify("error", `删除代码片段失败：${error.message}`);
         }
       };
 
@@ -551,7 +1078,18 @@ export class SnippetManager {
           await this.toggleSnippet(snippetId);
           setSnippets(this.getAllSnippets());
         } catch (error: any) {
-          orca.notify("error", `Failed to toggle snippet: ${error.message}`);
+          orca.notify("error", `切换代码片段失败：${error.message}`);
+        }
+      };
+
+      const handleTypeToggle = async (type: "css" | "js", enabled: boolean) => {
+        try {
+          await this.setTypeEnabled(type, enabled);
+          setSettings(this.getSettings());
+          setSnippets(this.getAllSnippets());
+          orca.notify("success", `${type.toUpperCase()} 总开关已${enabled ? "开启" : "关闭"}`);
+        } catch (error: any) {
+          orca.notify("error", `切换 ${type.toUpperCase()} 总开关失败：${error.message}`);
         }
       };
 
@@ -850,7 +1388,7 @@ export class SnippetManager {
                 },
                 className: "block__icon block__icon--show fn__flex-center ariaLabel",
                 style: { margin: "0 1px" },
-                title: "More Options",
+                title: "更多操作",
               }, React.createElement("i", { className: "ti ti-dots", style: { pointerEvents: "none" } })),
             ),
             showMoreMenu ? React.createElement(
@@ -867,20 +1405,20 @@ export class SnippetManager {
                 Menu,
                 null,
                 React.createElement(MenuText, {
-                  title: "Export Snippets",
+                  title: "导出全部",
                   preIcon: "ti ti-download",
                   onClick: () => {
                     setShowMoreMenu(false);
                     try {
                       this.exportSnippets();
-                      orca.notify("success", "Snippets exported successfully");
+                      orca.notify("success", "已导出全部代码片段");
                     } catch (error: any) {
-                      orca.notify("error", `Failed to export snippets: ${error.message}`);
+                      orca.notify("error", `导出代码片段失败：${error.message}`);
                     }
                   },
                 }),
                 React.createElement(MenuText, {
-                  title: "Import Snippets",
+                  title: "导入片段",
                   preIcon: "ti ti-upload",
                   onClick: () => {
                     setShowMoreMenu(false);
@@ -888,7 +1426,7 @@ export class SnippetManager {
                   },
                 }),
                 React.createElement(MenuText, {
-                  title: "Reload UI",
+                  title: "重载界面",
                   preIcon: "ti ti-refresh",
                   onClick: () => {
                     setShowMoreMenu(false);
@@ -912,17 +1450,17 @@ export class SnippetManager {
                     setSnippets(this.getAllSnippets());
                     window.dispatchEvent(new CustomEvent(`${this.pluginName}-refresh`));
                     const message = result.failed > 0
-                      ? `Imported ${result.success} snippet(s), ${result.failed} failed`
-                      : `Successfully imported ${result.success} snippet(s)`;
+                      ? `已导入 ${result.success} 条，${result.failed} 条失败`
+                      : `已导入 ${result.success} 条代码片段`;
                     orca.notify("success", message);
                     if (result.errors.length > 0) {
                       console.error("Import errors:", result.errors);
                     }
                   } else {
-                    orca.notify("error", `Failed to import: ${result.errors.join(", ")}`);
+                    orca.notify("error", `导入失败：${result.errors.join("；")}`);
                   }
                 } catch (error: any) {
-                  orca.notify("error", `Failed to import snippets: ${error.message}`);
+                  orca.notify("error", `导入代码片段失败：${error.message}`);
                 }
                 
                 // 重置 input 值，允许重复选择同一个文件
@@ -935,7 +1473,7 @@ export class SnippetManager {
               onClick: () => setShowSearch(!showSearch),
               className: "block__icon block__icon--show fn__flex-center ariaLabel",
               style: { margin: "0 1px" },
-              title: "Search",
+              title: "搜索",
             }, React.createElement("i", { className: "ti ti-search", style: { pointerEvents: "none" } })),
             // 添加按钮
             React.createElement(Button, {
@@ -950,7 +1488,7 @@ export class SnippetManager {
               },
               className: "block__icon block__icon--show fn__flex-center ariaLabel",
               style: { margin: "0 1px" },
-              title: "Add Snippet",
+              title: "添加代码片段",
             }, React.createElement("i", { className: "ti ti-plus", style: { pointerEvents: "none" } })),
             // 关闭按钮
             React.createElement(Button, {
@@ -964,6 +1502,49 @@ export class SnippetManager {
               style: { margin: "0 1px" },
             }, React.createElement("i", { className: "ti ti-x", style: { pointerEvents: "none" } }))
           ),
+          React.createElement(
+            "div",
+            {
+              style: {
+                padding: "8px 12px",
+                borderBottom: "1px solid var(--orca-border-color, var(--orca-color-border))",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                backgroundColor: currentTypeEnabled
+                  ? "var(--orca-bg-primary, var(--orca-color-bg-1))"
+                  : "var(--orca-bg-secondary, var(--orca-color-bg-2))",
+              },
+            },
+            React.createElement(
+              "span",
+              {
+                style: {
+                  flex: 1,
+                  fontSize: "13px",
+                  color: "var(--orca-text-primary, var(--orca-color-text-1))",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                },
+              },
+              `${snippetType.toUpperCase()} 总开关`
+            ),
+            React.createElement(
+              "span",
+              {
+                style: {
+                  fontSize: "12px",
+                  color: "var(--orca-text-secondary, var(--orca-color-text-2))",
+                },
+              },
+              currentTypeEnabled ? "已开启" : "已关闭"
+            ),
+            React.createElement(Switch, {
+              on: currentTypeEnabled,
+              onChange: (on: boolean) => handleTypeToggle(snippetType, on),
+            })
+          ),
           // 搜索输入框
           showSearch ? React.createElement(
             "div",
@@ -974,7 +1555,7 @@ export class SnippetManager {
             },
           },
             React.createElement(Input, {
-              placeholder: "Search snippets...",
+              placeholder: "搜索代码片段...",
               value: searchQuery,
               onChange: (e: any) => setSearchQuery(e.target.value),
               style: { width: "100%" },
@@ -1002,8 +1583,8 @@ export class SnippetManager {
                     },
                   },
                   snippetType === "css" 
-                    ? 'No CSS snippets yet. Click "+" to add one.'
-                    : 'No JavaScript snippets yet. Click "+" to add one.'
+                    ? '还没有 CSS 片段。点击「+」添加。'
+                    : '还没有 JavaScript 片段。点击「+」添加。'
                 )
               : React.createElement(
                   "div",
@@ -1075,8 +1656,23 @@ export class SnippetManager {
                               }, 100);
                             },
                             style: { padding: "4px", minWidth: "auto" },
-                            title: "Edit",
+                            title: "编辑",
                           }, React.createElement("i", { className: "ti ti-edit", style: { fontSize: "14px" } })),
+                          React.createElement(Button, {
+                            variant: "plain",
+                            onClick: (e: any) => {
+                              e?.stopPropagation();
+                              e?.preventDefault();
+                              try {
+                                this.exportSnippet(snippet.id);
+                                orca.notify("success", "已导出这条代码片段");
+                              } catch (error: any) {
+                                orca.notify("error", `导出这条代码片段失败：${error.message}`);
+                              }
+                            },
+                            style: { padding: "4px", minWidth: "auto" },
+                            title: "导出",
+                          }, React.createElement("i", { className: "ti ti-download", style: { fontSize: "14px" } })),
                           React.createElement(Button, {
                             variant: "plain",
                             onClick: async (e: any) => {
@@ -1085,7 +1681,7 @@ export class SnippetManager {
                               await handleDelete(snippet.id);
                             },
                             style: { padding: "4px", minWidth: "auto" },
-                            title: "Delete",
+                            title: "删除",
                           }, React.createElement("i", { className: "ti ti-trash", style: { fontSize: "14px" } }))
                         ) : null,
                         React.createElement("span", { style: { width: "8px" } }),
@@ -1221,7 +1817,7 @@ export class SnippetManager {
       try {
         root.render(React.createElement(ManagerMenu));
       } catch (error: any) {
-        orca.notify("error", `Failed to open manager: ${error?.message || String(error)}`, { title: "Error" });
+        orca.notify("error", `打开代码片段管理器失败：${error?.message || String(error)}`, { title: "错误" });
       }
     };
     
@@ -1398,19 +1994,19 @@ export class SnippetManager {
       const handleAdd = async () => {
         const content = editorRef.current ? editorRef.current.state.doc.toString() : formData.content;
         if (!formData.name.trim() || !content.trim()) {
-          orca.notify("error", "Name and content are required");
+          orca.notify("error", "名称和内容不能为空");
           return;
         }
 
         try {
           await this.addSnippet({ ...formData, content });
-          orca.notify("success", "Snippet added successfully");
+          orca.notify("success", "代码片段已添加");
           setIsAdding(false);
           setEditVisible(false);
           setFormData({ name: "", content: "", type: "css", enabled: true });
           window.dispatchEvent(new CustomEvent(`${this.pluginName}-refresh`));
         } catch (error: any) {
-          orca.notify("error", `Failed to add snippet: ${error.message}`);
+          orca.notify("error", `添加代码片段失败：${error.message}`);
         }
       };
 
@@ -1419,19 +2015,19 @@ export class SnippetManager {
         
         const content = editorRef.current ? editorRef.current.state.doc.toString() : formData.content;
         if (!formData.name.trim() || !content.trim()) {
-          orca.notify("error", "Name and content are required");
+          orca.notify("error", "名称和内容不能为空");
           return;
         }
 
         try {
           await this.updateSnippet(editingSnippet.id, { ...formData, content });
-          orca.notify("success", "Snippet updated successfully");
+          orca.notify("success", "代码片段已更新");
           setEditingSnippet(null);
           setEditVisible(false);
           setFormData({ name: "", content: "", type: "css", enabled: true });
           window.dispatchEvent(new CustomEvent(`${this.pluginName}-refresh`));
         } catch (error: any) {
-          orca.notify("error", `Failed to update snippet: ${error.message}`);
+          orca.notify("error", `更新代码片段失败：${error.message}`);
         }
       };
 
@@ -1490,7 +2086,7 @@ export class SnippetManager {
             }, React.createElement("i", { className: "ti ti-x" }))
           ),
           React.createElement(Input, {
-            placeholder: "Snippet name",
+            placeholder: "片段名称",
             value: formData.name,
             onChange: (e: any) =>
               setFormData({ ...formData, name: e.target.value }),
@@ -1514,7 +2110,7 @@ export class SnippetManager {
                   color: "var(--orca-text-primary)",
                 },
               },
-              "Type"
+              "类型"
             ),
             React.createElement(Segmented, {
               selected: formData.type,
@@ -1597,7 +2193,7 @@ export class SnippetManager {
                 setFormData({ ...formData, enabled: on });
               },
             }),
-            React.createElement("span", null, "Enable immediately")
+            React.createElement("span", null, "立即启用")
           ),
           React.createElement(
             "div",
@@ -1614,11 +2210,11 @@ export class SnippetManager {
             React.createElement(Button, {
               variant: "outline",
               onClick: closeEditDialog,
-            }, "Cancel"),
+            }, "取消"),
             React.createElement(Button, {
               variant: "solid",
               onClick: isAdding ? handleAdd : handleEdit,
-            }, isAdding ? "Add" : "Update")
+            }, isAdding ? "添加" : "更新")
           )
         )
       );
@@ -1627,4 +2223,3 @@ export class SnippetManager {
     editRoot.render(React.createElement(EditDialog));
   }
 }
-

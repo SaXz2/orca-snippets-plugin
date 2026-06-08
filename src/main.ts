@@ -1,6 +1,6 @@
 import { setupL10N, t } from "./libs/l10n";
 import zhCN from "./translations/zhCN";
-import { Snippet, SnippetManager } from "./snippet-manager";
+import { SnippetManager } from "./snippet-manager";
 
 let pluginName: string;
 let snippetManager: SnippetManager;
@@ -52,7 +52,7 @@ export async function load(_name: string) {
         onClick: (e: any) => {
           e?.stopPropagation();
           snippetManager.openManager().catch((error) => {
-            orca.notify("error", `Failed to open manager: ${error.message}`);
+            orca.notify("error", `打开代码片段管理器失败：${error.message}`);
           });
         },
         title: t("openSnippetsManager", {}, orca.state.locale === "zh-CN" ? "zh-CN" : "en"),
